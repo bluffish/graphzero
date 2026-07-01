@@ -1,9 +1,9 @@
+use crate::service::{internal, service_work};
 use crate::{EpisodeId, WorkerId};
-use gz_engine::{EngineError, EngineResult, ErrorCode, ErrorMessage, GraphEngine};
-use gz_eval::{EngineEvalRequest, EngineEvaluator};
+use gz_engine::{EngineResult, GraphEngine};
+use gz_eval::EngineEvaluator;
 use gz_search::{
-    EngineIdentity, ExpandedCandidate, GumbelEpisode, GumbelEpisodeContext, GumbelEpisodeTask,
-    GumbelMcts, SearchPoll, SearchWork, SearchWorkResult,
+    EngineIdentity, GumbelEpisode, GumbelEpisodeContext, GumbelEpisodeTask, GumbelMcts, SearchPoll,
 };
 
 pub struct SerialGumbelOrchestrator<E, V> {
@@ -14,11 +14,14 @@ pub struct SerialGumbelOrchestrator<E, V> {
     search: GumbelMcts,
 }
 
-pub struct SerialEpisode<G, C> {
+#[derive(Clone, Debug, PartialEq)]
+pub struct OrchestratedEpisode<G, C> {
     pub worker_id: WorkerId,
     pub episode_id: EpisodeId,
     pub episode: GumbelEpisode<G, C>,
 }
+
+pub type SerialEpisode<G, C> = OrchestratedEpisode<G, C>;
 
 impl<E, V> SerialGumbelOrchestrator<E, V>
 where
@@ -62,7 +65,7 @@ where
                 SearchPoll::Done(episode) => {
                     let episode_id = EpisodeId::new(self.next_episode_id);
                     self.next_episode_id += 1;
-                    return Ok(SerialEpisode {
+                    return Ok(OrchestratedEpisode {
                         worker_id: self.worker_id,
                         episode_id,
                         episode,
@@ -70,70 +73,5 @@ where
                 }
             }
         }
-    }
-}
-
-fn service_work<E, V>(
-    engine: &mut E,
-    evaluator: &mut V,
-    work: SearchWork<E::Graph, E::Candidate>,
-) -> EngineResult<SearchWorkResult<E::Graph, E::Candidate>>
-where
-    E: GraphEngine,
-    V: EngineEvaluator<E>,
-{
-    match work {
-        SearchWork::Expand(work) => {
-            let mut candidates = Vec::new();
-            engine.candidates(work.graph, work.options, &mut candidates)?;
-            let graph_hash = engine.hash(work.graph)?;
-            let candidates = candidates
-                .into_iter()
-                .map(|candidate| {
-                    engine
-                        .candidate_info(work.graph, candidate)?
-                        .validate()
-                        .map_err(|_| internal("invalid candidate info"))
-                        .map(|info| ExpandedCandidate {
-                            candidate,
-                            candidate_hash: info.candidate_hash,
-                            kind: info.kind,
-                            tags: info.tags,
-                            static_prior: info.static_prior,
-                        })
-                })
-                .collect::<EngineResult<Vec<_>>>()?;
-
-            Ok(SearchWorkResult::Expand(gz_search::ExpandResult {
-                graph_hash,
-                candidates,
-            }))
-        }
-        SearchWork::Apply(work) => engine
-            .apply(work.graph, work.candidate)
-            .map(SearchWorkResult::Apply),
-        SearchWork::Measure(work) => engine
-            .measure(work.graph, work.options)
-            .map(SearchWorkResult::Measure),
-        SearchWork::Eval(work) => {
-            let output = evaluator.evaluate(
-                engine,
-                EngineEvalRequest {
-                    graph: work.graph,
-                    candidates: &work.candidates,
-                    request: &work.request,
-                    measure_options: work.measure_options,
-                },
-            )?;
-            Ok(SearchWorkResult::Eval(output))
-        }
-        _ => Err(internal("unsupported search work")),
-    }
-}
-
-fn internal(message: &'static str) -> EngineError {
-    EngineError::Internal {
-        code: ErrorCode::new(1),
-        message: ErrorMessage::new(message).expect("internal orchestrator message is short"),
     }
 }

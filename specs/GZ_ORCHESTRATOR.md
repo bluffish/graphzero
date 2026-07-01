@@ -69,11 +69,11 @@ episode ids
 search task driving
 work routing for engine and eval requests
 engine lane ownership and task-to-lane assignment
-eval batching later
+single-process eval batching
 measure concurrency limits later
 replay sink driving later
 ratio/backpressure gating later
-bounded queues later
+bounded eval queues for the threaded single-process driver
 shutdown and cancellation later
 ```
 
@@ -520,11 +520,13 @@ pub struct SerialGumbelOrchestrator<E, V> {
     search: GumbelMcts,
 }
 
-pub struct SerialEpisode<G, C> {
+pub struct OrchestratedEpisode<G, C> {
     pub worker_id: WorkerId,
     pub episode_id: EpisodeId,
     pub episode: GumbelEpisode<G, C>,
 }
+
+pub type SerialEpisode<G, C> = OrchestratedEpisode<G, C>;
 
 impl<E, V> SerialGumbelOrchestrator<E, V>
 where
@@ -584,17 +586,17 @@ batched, nor whether its engine lane is inline or queued.
 Later async pieces:
 
 ```text
-EvalBatcher
 queued engine lane driver
 measure concurrency limiter
 ReplaySink
-WorkerPool
 ratio controller
 CancellationToken
 Metrics
 ```
 
-Do not add these in the serial slice.
+The single-process worker pool and bounded eval batcher now exist. Queued
+engine lanes, replay, ratio control, cancellation, and metrics remain later
+work.
 
 ## Measurement And Replay Boundary
 
@@ -723,7 +725,6 @@ goldens.
 ```text
 wave tree math spec (virtual visits, in-flight bookkeeping, halving barriers)
 async runtime choice
-bounded eval batcher
 queued engine lanes
 process lanes
 measure concurrency limiter

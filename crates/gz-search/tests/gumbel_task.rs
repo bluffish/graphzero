@@ -62,6 +62,14 @@ fn output(len: usize, value: f32) -> EvalOutput {
     }
 }
 
+fn output_with_logits(policy_logits: Vec<f32>, value: f32) -> EvalOutput {
+    EvalOutput {
+        model_version: ModelVersion::from_bytes([7; 16]),
+        policy_logits,
+        value,
+    }
+}
+
 fn first_expand(task: &mut GumbelRootTask<u8, u8>) -> (WorkToken, u8, CandidateOptions) {
     match task.poll().unwrap() {
         SearchPoll::Work(SearchWork::Expand(work)) => (work.token, work.graph, work.options),
@@ -195,6 +203,60 @@ fn root_task_blocks_while_pending_and_rejects_double_resume() {
         .unwrap_err();
 
     assert!(error.to_string().contains("resume without pending work"));
+}
+
+#[test]
+fn dropping_episode_task_with_outstanding_token_is_safe() {
+    let engine = TestEngine::new();
+    let search = GumbelMcts::new(config(1));
+    let mut task: GumbelEpisodeTask<u8, u8> = GumbelEpisodeTask::new(
+        &search,
+        EngineIdentity::from_engine(&engine),
+        0,
+        GumbelEpisodeContext::default(),
+    );
+
+    assert!(matches!(task.poll().unwrap(), SearchPoll::Work(_)));
+}
+
+#[test]
+fn rejected_apply_masks_action_and_next_poll_emits_work() {
+    let mut engine = TestEngine::new()
+        .candidates(0, [1, 2])
+        .rejected(0, 1)
+        .apply(0, 2, 3);
+    let search = GumbelMcts::new(config(1));
+    let mut task = GumbelRootTask::new(
+        &search,
+        EngineIdentity::from_engine(&engine),
+        0,
+        GumbelSearchContext::default(),
+    );
+    let (token, graph, options) = first_expand(&mut task);
+    let eval = first_eval(&mut task, &mut engine, token, graph, options);
+    task.resume(
+        eval.token,
+        SearchWorkResult::Eval(output_with_logits(vec![10.0, 9.0, 0.0], 0.0)),
+    )
+    .unwrap();
+
+    let first_apply = match task.poll().unwrap() {
+        SearchPoll::Work(SearchWork::Apply(work)) => work,
+        other => panic!("expected first apply, got {other:?}"),
+    };
+    assert_eq!(first_apply.candidate, 1);
+
+    let rejected =
+        GraphEngine::apply(&mut engine, first_apply.graph, first_apply.candidate).unwrap();
+    task.resume(first_apply.token, SearchWorkResult::Apply(rejected))
+        .unwrap();
+
+    let second_apply = match task.poll().unwrap() {
+        SearchPoll::Work(SearchWork::Apply(work)) => work,
+        other => panic!("expected second apply, got {other:?}"),
+    };
+    assert_eq!(second_apply.graph, 0);
+    assert_eq!(second_apply.candidate, 2);
 }
 
 #[test]
