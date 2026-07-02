@@ -265,7 +265,7 @@ impl WhittleEngine {
         self.measure_config_hash
     }
 
-    fn graph(&self, graph: WhittleGraphId) -> EngineResult<&WhittleGraph> {
+    pub(crate) fn graph(&self, graph: WhittleGraphId) -> EngineResult<&WhittleGraph> {
         self.graphs
             .get(graph)
             .ok_or(EngineError::UnknownGraph { graph_hash: None })

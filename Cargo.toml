@@ -2,6 +2,7 @@
 members = [
     "crates/gz-engine",
     "crates/gz-engine-whittle",
+    "crates/gz-features",
     "crates/gz-search",
     "crates/gz-eval",
     "crates/gz-eval-whittle",

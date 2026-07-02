@@ -39,7 +39,7 @@ It does not own:
 ```text
 MCTS/search
 neural evaluator/model code
-feature extraction
+generic feature schema/collation
 replay storage
 Python bindings
 PyTorch
@@ -128,6 +128,7 @@ Dependencies:
 
 ```text
 gz-engine
+gz-features
 blake3 or another explicitly chosen fast hash for 32-byte ids
 rand + rand_chacha or another explicitly chosen deterministic RNG
 ```
@@ -143,6 +144,10 @@ torch
 gz-search
 gz-replay
 ```
+
+Whittle owns its concrete `WhittleFeatureExtractor` because it needs direct
+arena access. Generic schema, row validation, collation, and wire formats stay
+in `gz-features`.
 
 If `blake3` is used, all hash derivations in this crate must be documented and
 covered by golden tests. Do not add a generic serialization framework for the

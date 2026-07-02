@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 blake3 = "1.8.5"
 gz-engine = { path = "../gz-engine" }
+gz-features = { path = "../gz-features" }
 rand = "0.10.1"
 rand_chacha = "0.10.0"
 

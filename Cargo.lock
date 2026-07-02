@@ -248,6 +248,7 @@ dependencies = [
  "blake3",
  "gz-engine",
  "gz-eval",
+ "gz-features",
  "gz-search",
  "rand",
  "rand_chacha",
@@ -268,6 +269,14 @@ dependencies = [
  "gz-engine",
  "gz-engine-whittle",
  "gz-eval",
+]
+
+[[package]]
+name = "gz-features"
+version = "0.1.0"
+dependencies = [
+ "blake3",
+ "gz-engine",
 ]
 
 [[package]]

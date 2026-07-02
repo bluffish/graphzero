@@ -3,6 +3,7 @@ use std::collections::HashSet;
 use std::fmt;
 
 const MAX_MATCHED: usize = 8;
+pub const RULE_COUNT: u32 = 44;
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
 #[repr(u16)]

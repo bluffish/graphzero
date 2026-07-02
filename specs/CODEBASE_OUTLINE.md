@@ -218,37 +218,57 @@ final domain.
 
 ### `gz-features`
 
-Generic feature extraction, separate from the engine.
+Generic feature row schema, fixed-layout collation, and model-output decoding.
+`GZ_FEATURES.md` owns the detailed crate contract.
 
 ```rust
 pub trait FeatureExtractor<E: GraphEngine> {
-    type StateFeatures;
-    type CandidateFeatures;
-    type Batch;
-
-    fn state_features(&mut self, engine: &E, graph: E::Graph) -> Result<Self::StateFeatures>;
-
-    fn candidate_features(
+    fn schema(&self) -> &FeatureSchema;
+    fn extract(
         &mut self,
         engine: &E,
         graph: E::Graph,
         candidates: &[E::Candidate],
-    ) -> Result<Self::CandidateFeatures>;
-
-    fn collate(&mut self, rows: &[FeatureRow<E>]) -> Result<Self::Batch>;
+        position: PositionFeatures,
+    ) -> FeatureResult<FeatureRow>;
 }
 ```
 
 Owns:
 
 ```text
+FeatureSchema / FeatureSchemaHash
+FeatureRow / ActionFeature / FeatureEdge / PositionFeatures
+FeatureExtractor<E>
+FeatureCollator
+fixed binary batch and output layouts
+FeatureBatchView parser for diagnostics/tests
+FeatureError
+```
+
+Does not own:
+
+```text
+concrete extractors
+eval transport
+Python/PyTorch model code
+replay storage
+orchestration
+```
+
+Decision:
+
+```text
+All engines map into one concrete FeatureRow representation. Extractors stay
+engine-side; the collator is schema-only and can run in a batcher with no
+engine access.
+```
+
+Deprecated sketch replaced by `GZ_FEATURES.md`:
+
+```text
 FeatureSchemaHash
-state feature cache by PortableGraphId + FeatureSchemaHash
-candidate feature cache by PortableCandidateRef + FeatureSchemaHash
-action-history encoding
-batch padding
-shape metadata
-feature schema metadata exported to evaluator/trainer
+per-engine associated StateFeatures / CandidateFeatures / Batch types
 ```
 
 ### `gz-search`
