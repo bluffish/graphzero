@@ -236,6 +236,7 @@ specs/
   GZ_REPLAY.md
   GZ_SEARCH.md
   GZ_SEARCH_GUMBEL_MCTS.md
+  GZ_TRAINING_DATA_IMPL.md
 ```
 
 Planned layout:
