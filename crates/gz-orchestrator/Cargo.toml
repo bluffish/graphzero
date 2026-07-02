@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 gz-engine = { path = "../gz-engine" }
 gz-eval = { path = "../gz-eval" }
+gz-replay = { path = "../gz-replay" }
 gz-search = { path = "../gz-search" }
 
 [dev-dependencies]

@@ -266,6 +266,7 @@ dependencies = [
  "gz-engine-whittle",
  "gz-eval",
  "gz-eval-whittle",
+ "gz-replay",
  "gz-search",
 ]
 
