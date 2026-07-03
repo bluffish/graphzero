@@ -48,6 +48,7 @@ fn selfplay_run_writes_replay_rows() {
         python_dir: None,
         checkpoint_dir: None,
         eval_device: None,
+        eval_poll_interval: None,
         serve_socket: None,
         serve_max_batch: 512,
         replay_backlog: None,
@@ -80,6 +81,7 @@ fn selfplay_run_supports_stub_evaluator() {
         python_dir: None,
         checkpoint_dir: None,
         eval_device: None,
+        eval_poll_interval: None,
         serve_socket: None,
         serve_max_batch: 512,
         replay_backlog: None,
@@ -109,6 +111,7 @@ fn selfplay_run_supports_self_average_reference() {
         python_dir: None,
         checkpoint_dir: None,
         eval_device: None,
+        eval_poll_interval: None,
         serve_socket: None,
         serve_max_batch: 512,
         replay_backlog: None,
@@ -137,6 +140,7 @@ fn serving_config(dir: &TestDir) -> SelfplayConfig {
         python_dir: None,
         checkpoint_dir: None,
         eval_device: None,
+        eval_poll_interval: None,
         serve_socket: Some(dir.path().join("live.sock")),
         serve_max_batch: 512,
         replay_backlog: None,
@@ -246,4 +250,39 @@ fn selfplay_config_rejects_eval_device_without_torch() {
 
     let error = config.validate().unwrap_err();
     assert!(error.contains("--eval-device requires"), "{error}");
+}
+
+#[test]
+fn torch_evaluator_forwards_the_poll_interval() {
+    let dir = TestDir::new();
+    let mut config = serving_config(&dir);
+    config.evaluator = EvaluatorMode::Torch;
+    config.checkpoint_dir = Some(PathBuf::from("/ckpt"));
+    config.eval_poll_interval = Some(0.5);
+    config.validate().unwrap();
+
+    let args = config.evaluator_extra_args();
+    assert_eq!(&args[6..], ["--poll-interval", "0.5"]);
+}
+
+#[test]
+fn selfplay_config_rejects_poll_interval_without_torch() {
+    let dir = TestDir::new();
+    let mut config = serving_config(&dir);
+    config.eval_poll_interval = Some(0.5);
+
+    let error = config.validate().unwrap_err();
+    assert!(error.contains("--eval-poll-interval requires"), "{error}");
+}
+
+#[test]
+fn selfplay_config_rejects_negative_poll_interval() {
+    let dir = TestDir::new();
+    let mut config = serving_config(&dir);
+    config.evaluator = EvaluatorMode::Torch;
+    config.checkpoint_dir = Some(PathBuf::from("/ckpt"));
+    config.eval_poll_interval = Some(-1.0);
+
+    let error = config.validate().unwrap_err();
+    assert!(error.contains("--eval-poll-interval must be"), "{error}");
 }

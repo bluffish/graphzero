@@ -99,6 +99,9 @@ fn parse_selfplay(args: Vec<String>) -> Result<SelfplayConfig, String> {
             "--python-dir" => config.python_dir = Some(PathBuf::from(value)),
             "--checkpoint-dir" => config.checkpoint_dir = Some(PathBuf::from(value)),
             "--eval-device" => config.eval_device = Some(value.clone()),
+            "--eval-poll-interval" => {
+                config.eval_poll_interval = Some(parse_f32(flag, value)?);
+            }
             "--seed" => config.seed = parse_u64(flag, value)?,
             "--max-steps" => config.max_steps = parse_usize(flag, value)?,
             "--simulations" => config.simulations = parse_usize(flag, value)?,
@@ -134,5 +137,5 @@ fn parse_f32(flag: &str, value: &str) -> Result<f32, String> {
 }
 
 fn usage() -> &'static str {
-    "usage: graphzero selfplay --replay-dir PATH [--episodes N; 0 = unbounded] [--lanes L] [--workers-per-lane W] [--reference root|greedy|beam|random|self-average|none] [--reference-ema-decay D] [--evaluator random|stub|process-stub|torch] [--python-dir PATH] [--checkpoint-dir DIR] [--eval-device DEV] [--seed S] [--max-steps M] [--simulations K] [--max-batch B] [--serve-socket PATH] [--serve-max-batch B] [--replay-backlog ROWS]\n       graphzero replay-serve --replay-dir PATH --socket PATH --max-batch B"
+    "usage: graphzero selfplay --replay-dir PATH [--episodes N; 0 = unbounded] [--lanes L] [--workers-per-lane W] [--reference root|greedy|beam|random|self-average|none] [--reference-ema-decay D] [--evaluator random|stub|process-stub|torch] [--python-dir PATH] [--checkpoint-dir DIR] [--eval-device DEV] [--eval-poll-interval SECS] [--seed S] [--max-steps M] [--simulations K] [--max-batch B] [--serve-socket PATH] [--serve-max-batch B] [--replay-backlog ROWS]\n       graphzero replay-serve --replay-dir PATH --socket PATH --max-batch B"
 }

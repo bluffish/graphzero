@@ -43,6 +43,7 @@ pub struct SelfplayConfig {
     pub python_dir: Option<PathBuf>,
     pub checkpoint_dir: Option<PathBuf>,
     pub eval_device: Option<String>,
+    pub eval_poll_interval: Option<f32>,
     pub serve_socket: Option<PathBuf>,
     pub serve_max_batch: usize,
     pub replay_backlog: Option<u64>,
@@ -65,6 +66,7 @@ impl Default for SelfplayConfig {
             python_dir: None,
             checkpoint_dir: None,
             eval_device: None,
+            eval_poll_interval: None,
             serve_socket: None,
             serve_max_batch: 512,
             replay_backlog: None,
@@ -119,6 +121,14 @@ impl SelfplayConfig {
             if self.eval_device.is_some() {
                 return Err("--eval-device requires --evaluator torch".to_owned());
             }
+            if self.eval_poll_interval.is_some() {
+                return Err("--eval-poll-interval requires --evaluator torch".to_owned());
+            }
+        }
+        if let Some(interval) = self.eval_poll_interval
+            && (!interval.is_finite() || interval < 0.0)
+        {
+            return Err("--eval-poll-interval must be zero (disabled) or positive".to_owned());
         }
         if self.episodes == 0 && self.serve_socket.is_none() {
             return Err("--episodes 0 (unbounded) requires --serve-socket".to_owned());
@@ -143,14 +153,19 @@ impl SelfplayConfig {
                     .as_ref()
                     .expect("validated checkpoint_dir exists");
                 let device = self.eval_device.as_deref().unwrap_or("cuda:0");
-                vec![
+                let mut args = vec![
                     "--backend".to_owned(),
                     "torch".to_owned(),
                     "--checkpoint-dir".to_owned(),
                     checkpoint_dir.display().to_string(),
                     "--device".to_owned(),
                     device.to_owned(),
-                ]
+                ];
+                if let Some(interval) = self.eval_poll_interval {
+                    args.push("--poll-interval".to_owned());
+                    args.push(interval.to_string());
+                }
+                args
             }
         }
     }

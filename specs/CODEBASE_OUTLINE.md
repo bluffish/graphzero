@@ -582,7 +582,7 @@ Human entry points.
 Implemented:
 
 ```bash
-graphzero selfplay --replay-dir PATH [--episodes N; 0 = unbounded] [--lanes L] [--workers-per-lane W] [--reference root|greedy|beam|random|self-average|none] [--reference-ema-decay D] [--evaluator random|stub|process-stub|torch] [--python-dir PATH] [--checkpoint-dir DIR] [--eval-device DEV] [--seed S] [--max-steps M] [--simulations K] [--max-batch B] [--serve-socket PATH] [--serve-max-batch B] [--replay-backlog ROWS]
+graphzero selfplay --replay-dir PATH [--episodes N; 0 = unbounded] [--lanes L] [--workers-per-lane W] [--reference root|greedy|beam|random|self-average|none] [--reference-ema-decay D] [--evaluator random|stub|process-stub|torch] [--python-dir PATH] [--checkpoint-dir DIR] [--eval-device DEV] [--eval-poll-interval SECS] [--seed S] [--max-steps M] [--simulations K] [--max-batch B] [--serve-socket PATH] [--serve-max-batch B] [--replay-backlog ROWS]
 graphzero replay-serve --replay-dir PATH --socket PATH --max-batch B
 ```
 

@@ -132,8 +132,9 @@ bootstrap:
      build model on the trainer device; publish version 0; stop serve
 steady state:
   3. spawn graphzero selfplay --evaluator torch --checkpoint-dir ...
-     --eval-device <cfg> --episodes 0 --serve-socket <path>
-     --reference self-average --replay-backlog <cfg>
+     --eval-device <cfg> --eval-poll-interval <cfg> --episodes 0
+     --serve-socket <path> --reference self-average
+     --replay-backlog <cfg>
   4. trainer loop to total_steps, publishing every publish_interval
   5. publish final checkpoint; SIGKILL selfplay; exit 0
 supervision: poll the selfplay child every few seconds from the trainer
@@ -154,8 +155,11 @@ acceptance list mechanically:
 ```text
 run completes; metrics JSONL nonempty and monotone in step
 concurrency: selfplay stderr timestamps interleave with step timestamps
-hot swap happened: >= 2 distinct model_versions among sampled rows'
-model_version fields (sample the store afterwards via replay-serve)
+hot swap happened: the selfplay child's stderr contains
+event=checkpoint_swapped at least once and event=checkpoint_rejected
+never (GZFT targets do not carry per-row model_version, so the swap is
+asserted from the evaluator's stderr events; per-row versions live only
+in the store records)
 backpressure: rerun with step_sleep large and a small backlog cap; the
 store's produced_rows stays near the cap instead of growing unboundedly
 kill safety: SIGKILL the selfplay child mid-run in a dedicated test; the
