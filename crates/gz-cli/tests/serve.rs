@@ -433,3 +433,52 @@ fn live_backpressure_gates_production_until_the_consumer_drains() {
     assert!(counters.consumed_rows > 0);
     assert!(counters.produced_rows >= 12);
 }
+
+#[test]
+fn replay_serve_reacks_a_repeated_hello_on_a_live_connection() {
+    let dir = TestDir::new();
+    let socket = dir.path().join("rehello.sock");
+    let (store, engines, extractors, search) = live_setup(&dir, &socket);
+
+    let providers = vec![RootBaselineProvider::new(engines[0].measure_options())];
+    let orchestrator = ThreadedGumbelOrchestrator::new(
+        engines,
+        RandomValueEvaluator::new(RandomValueEvaluatorConfig::default()).unwrap(),
+        search,
+        ThreadedOrchestratorConfig {
+            workers_per_lane: NonZeroUsize::new(1).unwrap(),
+            max_batch: NonZeroUsize::new(1).unwrap(),
+            flush_after: Duration::from_millis(1),
+        },
+    );
+    orchestrator
+        .run_featurized_with_replay(
+            vec![generated_roots(2, 3)],
+            gz_search::GumbelEpisodeContext::default(),
+            FeaturizedRuntime {
+                extractors,
+                backend: StubBackend,
+            },
+            ReplayRuntime {
+                store: &store,
+                providers,
+                backpressure: None,
+            },
+        )
+        .unwrap();
+
+    let mut stream = wait_for_rows(&socket);
+    sample_once(&mut stream, 1, 7);
+
+    let mut hello = Vec::new();
+    hello.extend_from_slice(&SAMPLE_PROTOCOL_VERSION.to_le_bytes());
+    hello.extend_from_slice(&ENCODING_VERSION.to_le_bytes());
+    write_frame(&mut stream, 1, &[&hello]);
+    let (frame_type, ack) = read_frame(&mut stream);
+    assert_eq!(frame_type, 2);
+    let produced = u64::from_le_bytes(ack[40..48].try_into().unwrap());
+    assert!(produced > 0);
+
+    // The connection keeps sampling after the re-ack.
+    sample_once(&mut stream, 1, 8);
+}

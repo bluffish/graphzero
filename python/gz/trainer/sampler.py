@@ -97,9 +97,11 @@ class SampleClient:
         self.ack = decode_ack(payload)
         return self.ack
 
-    def wait_until_ready(self, min_startup_rows: int) -> SampleAck:
+    def wait_until_ready(self, min_startup_rows: int, alive_check: object = None) -> SampleAck:
         deadline = time.monotonic() + self.startup_timeout
         while True:
+            if alive_check is not None:
+                alive_check()
             try:
                 ack = self.connect()
                 if ack.produced_rows >= min_startup_rows:
@@ -111,10 +113,17 @@ class SampleClient:
             time.sleep(self.backoff)
 
     def sample(self, batch: int, window: int, seed: int) -> SampleResult:
+        return self._with_reconnect(lambda: self._sample_connected(batch, window, seed))
+
+    def refresh(self) -> SampleAck:
+        """Re-acks on the live connection for fresh produced_rows."""
+        return self._with_reconnect(self._refresh_connected)
+
+    def _with_reconnect(self, request: object) -> object:
         failures = 0
         while True:
             try:
-                return self._sample_connected(batch, window, seed)
+                return request()
             except (OSError, ProtocolError, SampleError):
                 self.close()
                 failures += 1
@@ -122,6 +131,19 @@ class SampleClient:
                     raise
                 time.sleep(self.backoff)
                 self.connect()
+
+    def _refresh_connected(self) -> SampleAck:
+        if self.sock is None:
+            return self.connect()
+        write_frame(self.sock, FRAME_HELLO, struct.pack("<II", PROTOCOL_VERSION, ENCODING_VERSION))
+        frame_type, payload = read_frame(self.sock, self.read_buf)
+        if frame_type == FRAME_ERROR:
+            code, message = decode_error(payload)
+            raise SampleError(f"sample hello failed: {code} {message}")
+        if frame_type != FRAME_HELLO_ACK:
+            raise SampleError("expected sample HELLO_ACK")
+        self.ack = decode_ack(payload)
+        return self.ack
 
     def _sample_connected(self, batch: int, window: int, seed: int) -> SampleResult:
         if self.sock is None:

@@ -28,7 +28,6 @@ max_row_backlog = 200000
 eval_device = "cuda:0"
 eval_poll_interval = 10.0
 seed = 0
-serve_max_batch = 512
 max_batch = 16
 python_dir = "python"
 
@@ -37,4 +36,4 @@ replay_dir = "runs/train-whittle/replay"
 checkpoint_dir = "runs/train-whittle/checkpoints"
 run_dir = "runs/train-whittle"
 sample_socket = "runs/train-whittle/sample.sock"
-graphzero_bin = "graphzero"
+graphzero_bin = "target/release/graphzero"

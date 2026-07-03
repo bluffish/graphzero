@@ -49,7 +49,6 @@ class SelfplayConfig:
     eval_device: str = "cuda:0"
     eval_poll_interval: float = 10.0
     seed: int = 0
-    serve_max_batch: int = 512
     max_batch: int = 16
     python_dir: str = "python"
 
@@ -84,8 +83,10 @@ def run(config_path: str | Path) -> None:
             startup_timeout=config.trainer.startup_timeout,
             reconnect_limit=config.trainer.reconnect_limit,
         )
-        sampler.wait_until_ready(config.trainer.min_startup_rows)
-        torch = _torch()
+        sampler.wait_until_ready(
+            config.trainer.min_startup_rows,
+            alive_check=lambda: check_child(serve, "replay-serve"),
+        )
         arch = ArchConfig()
         model = build_model(sampler.feature_schema, arch).to(config.trainer.device)
         ema = EmaWeights(model, config.trainer.ema_decay)
@@ -109,7 +110,10 @@ def run(config_path: str | Path) -> None:
             startup_timeout=config.trainer.startup_timeout,
             reconnect_limit=config.trainer.reconnect_limit,
         )
-        sampler.wait_until_ready(config.trainer.min_startup_rows)
+        sampler.wait_until_ready(
+            config.trainer.min_startup_rows,
+            alive_check=lambda: check_child(selfplay, "selfplay"),
+        )
         stager = TrainingStager(sampler.feature_schema, config.trainer.batch, config.trainer.device)
         loop = TrainerLoop(
             model,
@@ -131,7 +135,7 @@ def run(config_path: str | Path) -> None:
             metrics_record = loop.train_step(stager.copy(result.batch, result.targets))
             ema.update(model)
             if step % config.trainer.log_interval == 0:
-                produced = result.produced_rows
+                produced = sampler.refresh().produced_rows
                 metrics.write(
                     {
                         "event": "step",
@@ -169,16 +173,23 @@ def run(config_path: str | Path) -> None:
                 )
             if config.trainer.step_sleep:
                 time.sleep(config.trainer.step_sleep)
-        final = publish_ema(
-            config.paths.checkpoint_dir,
-            ema,
-            schema=sampler.feature_schema,
-            schema_hash=sampler.feature_schema_hash,
-            arch=arch,
-            training_step=config.trainer.total_steps,
-            run_id=config.paths.run_dir.name,
-        )
-        metrics.write({"event": "publish", "training_step": config.trainer.total_steps, "model_version": final.model_version.hex()})
+        if config.trainer.total_steps % config.trainer.publish_interval != 0:
+            final = publish_ema(
+                config.paths.checkpoint_dir,
+                ema,
+                schema=sampler.feature_schema,
+                schema_hash=sampler.feature_schema_hash,
+                arch=arch,
+                training_step=config.trainer.total_steps,
+                run_id=config.paths.run_dir.name,
+            )
+            metrics.write(
+                {
+                    "event": "publish",
+                    "training_step": config.trainer.total_steps,
+                    "model_version": final.model_version.hex(),
+                }
+            )
     except BaseException:
         kill_child(selfplay)
         raise
@@ -300,11 +311,17 @@ def spawn_torch_selfplay(config: RunConfig) -> subprocess.Popen[bytes]:
             str(config.selfplay.max_batch),
             "--serve-socket",
             str(config.paths.sample_socket),
+            # Sampled GZFB/GZFT batches are encoded at the serve capacity, and
+            # the trainer stages at trainer.batch — they must be one knob.
             "--serve-max-batch",
-            str(config.selfplay.serve_max_batch),
+            str(config.trainer.batch),
             "--replay-backlog",
             str(config.selfplay.max_row_backlog),
-        ]
+        ],
+        # Selfplay spawns the evaluator child; a new session lets kill_child
+        # take down the whole group instead of orphaning the evaluator (and
+        # its GPU memory) when selfplay is SIGKILLed.
+        start_new_session=True,
     )
 
 
@@ -325,9 +342,15 @@ def stop_child(child: subprocess.Popen[bytes]) -> None:
 
 
 def kill_child(child: subprocess.Popen[bytes]) -> None:
-    if child.poll() is not None:
-        return
-    child.send_signal(signal.SIGKILL)
+    try:
+        # Children spawned with start_new_session lead their own group;
+        # kill the group so their own children (the evaluator) die too.
+        if os.getpgid(child.pid) == child.pid:
+            os.killpg(child.pid, signal.SIGKILL)
+        elif child.poll() is None:
+            child.send_signal(signal.SIGKILL)
+    except ProcessLookupError:
+        pass
     child.wait()
 
 
@@ -339,9 +362,3 @@ def _dataclass_from_dict(cls: object, data: object) -> object:
     if unknown:
         raise ValueError(f"unknown config fields for {cls.__name__}: {sorted(unknown)}")
     return cls(**data)
-
-
-def _torch():
-    import torch
-
-    return torch

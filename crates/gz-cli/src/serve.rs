@@ -147,6 +147,15 @@ impl ReplaySampleServer {
         while let Some((frame_type, payload)) =
             read_frame(stream, &mut read_buf).map_err(|error| error.to_string())?
         {
+            // A repeated HELLO re-acks with fresh produced_rows so a
+            // long-lived trainer connection can watch production advance.
+            if frame_type == FRAME_HELLO {
+                if let Err(error) = self.handle_hello(payload, stream, &mut write_buf) {
+                    send_error(stream, &mut write_buf, error.0, error.1)?;
+                    return Ok(());
+                }
+                continue;
+            }
             if frame_type != FRAME_SAMPLE {
                 send_error(stream, &mut write_buf, ERROR_PROTOCOL, "expected SAMPLE")?;
                 return Ok(());
