@@ -97,6 +97,11 @@ impl FeatureExtractor<WhittleEngine> for WhittleFeatureExtractor {
         let graph_hash = engine.hash(graph)?;
         let graph_id =
             PortableGraphId::new(graph_hash, engine.engine_id(), engine.engine_version());
+        // Unbounded selfplay sees millions of distinct graphs; the cache
+        // only pays off within a search, so cap it instead of growing it.
+        if self.state_cache.len() >= 8192 {
+            self.state_cache.clear();
+        }
         let state = if let Some(cached) = self.state_cache.get(&graph_id) {
             cached.clone()
         } else {

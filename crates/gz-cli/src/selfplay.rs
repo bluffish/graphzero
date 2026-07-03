@@ -51,6 +51,7 @@ pub struct SelfplayConfig {
     pub serve_socket: Option<PathBuf>,
     pub serve_max_batch: usize,
     pub replay_backlog: Option<u64>,
+    pub replay_retain: Option<u64>,
 }
 
 impl Default for SelfplayConfig {
@@ -78,6 +79,7 @@ impl Default for SelfplayConfig {
             serve_socket: None,
             serve_max_batch: 512,
             replay_backlog: None,
+            replay_retain: None,
         }
     }
 }
@@ -155,6 +157,9 @@ impl SelfplayConfig {
         }
         if self.replay_backlog == Some(0) {
             return Err("--replay-backlog must be greater than zero".to_owned());
+        }
+        if self.replay_retain == Some(0) {
+            return Err("--replay-retain must be greater than zero".to_owned());
         }
 
         Ok(())
@@ -269,8 +274,10 @@ pub fn run(config: SelfplayConfig) -> Result<SelfplaySummary, String> {
         .replay_dir
         .as_ref()
         .expect("validated replay_dir exists");
-    let store =
-        std::sync::Arc::new(ReplayStore::open(replay_dir).map_err(|error| error.to_string())?);
+    let store = std::sync::Arc::new(
+        ReplayStore::open_with_retention(replay_dir, config.replay_retain)
+            .map_err(|error| error.to_string())?,
+    );
     let engines = (0..config.lanes)
         .map(|_| WhittleEngine::new(whittle_engine_config()).map_err(|error| error.to_string()))
         .collect::<Result<Vec<_>, _>>()?;

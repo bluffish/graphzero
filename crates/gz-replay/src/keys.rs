@@ -10,6 +10,8 @@ pub(crate) const META_EPISODES_STOPPED: &[u8] = b"episodes_stopped";
 pub(crate) const META_NEXT_EPISODE_SEQ: &[u8] = b"next_episode_seq";
 pub(crate) const META_PRODUCED_ROWS: &[u8] = b"produced_rows";
 pub(crate) const META_CONSUMED_ROWS: &[u8] = b"consumed_rows";
+pub(crate) const META_RETAINED_FLOOR: &[u8] = b"retained_floor";
+pub(crate) const META_DELETED_FLOOR: &[u8] = b"deleted_floor";
 pub(crate) const META_FEATURE_SCHEMA: &[u8] = b"feature_schema";
 
 pub(crate) const EPISODE_KEY_LEN: usize = 8;
@@ -42,6 +44,15 @@ pub(crate) fn decode_episode_from_row_key(key: &[u8]) -> Option<u64> {
 
     let bytes: [u8; 8] = key[..8].try_into().ok()?;
     Some(u64::from_be_bytes(bytes))
+}
+
+pub(crate) fn decode_step_from_row_key(key: &[u8]) -> Option<u32> {
+    if key.len() != ROW_KEY_LEN {
+        return None;
+    }
+
+    let bytes: [u8; 4] = key[8..].try_into().ok()?;
+    Some(u32::from_be_bytes(bytes))
 }
 
 pub(crate) fn encode_u32(value: u32) -> [u8; 4] {

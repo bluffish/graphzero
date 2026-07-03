@@ -89,6 +89,7 @@ fn selfplay_run_writes_replay_rows() {
         serve_socket: None,
         serve_max_batch: 512,
         replay_backlog: None,
+        replay_retain: None,
     })
     .unwrap();
     let store = ReplayStore::open(dir.path()).unwrap();
@@ -126,6 +127,7 @@ fn selfplay_run_supports_stub_evaluator() {
         serve_socket: None,
         serve_max_batch: 512,
         replay_backlog: None,
+        replay_retain: None,
     })
     .unwrap();
 
@@ -160,6 +162,7 @@ fn selfplay_run_supports_self_average_reference() {
         serve_socket: None,
         serve_max_batch: 512,
         replay_backlog: None,
+        replay_retain: None,
     })
     .unwrap();
 
@@ -193,6 +196,7 @@ fn serving_config(dir: &TestDir) -> SelfplayConfig {
         serve_socket: Some(dir.path().join("live.sock")),
         serve_max_batch: 512,
         replay_backlog: None,
+        replay_retain: None,
     }
 }
 

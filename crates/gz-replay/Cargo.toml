@@ -7,5 +7,5 @@ edition.workspace = true
 gz-engine = { path = "../gz-engine", features = ["serde"] }
 gz-features = { path = "../gz-features" }
 postcard = { version = "1", features = ["alloc"] }
-rocksdb = { version = "0.22", default-features = false }
+rocksdb = { version = "0.22", default-features = false, features = ["lz4"] }
 serde = { version = "1", features = ["derive"] }

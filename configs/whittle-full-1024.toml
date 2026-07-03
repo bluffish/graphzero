@@ -42,6 +42,7 @@ max_candidates = 1023
 reference = "self-average"
 reference_ema_decay = 0.99
 max_row_backlog = 1000000
+replay_retain = 600000
 eval_device = "cuda:0"
 eval_poll_interval = 10.0
 seed = 2

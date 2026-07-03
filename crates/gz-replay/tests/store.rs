@@ -1,7 +1,7 @@
 mod common;
 
 use common::{episode_with_feature_rows, episode_with_rows, feature_schema_config, measure};
-use gz_replay::{ReplayEpisodeId, ReplayError, ReplayStore};
+use gz_replay::{ReplayEpisodeId, ReplayError, ReplayStore, SampleConfig};
 use rocksdb::{ColumnFamilyDescriptor, DB, Options};
 
 #[test]
@@ -323,4 +323,50 @@ fn raw_db(path: &std::path::Path) -> DB {
         ],
     )
     .unwrap()
+}
+
+#[test]
+fn retention_deletes_old_episodes_and_clamps_sampling() {
+    let dir = common::temp_dir();
+    let store = ReplayStore::open_with_retention(dir.path(), Some(20)).unwrap();
+    store
+        .ensure_feature_schema(&feature_schema_config())
+        .unwrap();
+
+    // 4-row episodes; retention 20 rows triggers past 25 produced.
+    for _ in 0..20 {
+        let (record, rows) = episode_with_feature_rows(4);
+        store.append_episode(&record, &rows).unwrap();
+    }
+
+    let counters = store.counters();
+    assert_eq!(counters.produced_rows, 80);
+    // Old episodes are gone; recent ones remain.
+    assert!(store.episode(ReplayEpisodeId::new(0)).unwrap().is_none());
+    assert!(store.episode(ReplayEpisodeId::new(19)).unwrap().is_some());
+
+    // Sampling a huge window never touches deleted rows.
+    for seed in 0..50 {
+        let sampled = store
+            .sample_rows(SampleConfig {
+                batch: std::num::NonZeroUsize::new(8).unwrap(),
+                window_rows: std::num::NonZeroU64::new(1_000_000).unwrap(),
+                seed,
+            })
+            .unwrap();
+        assert_eq!(sampled.len(), 8);
+    }
+
+    // Floors survive reopen.
+    drop(store);
+    let reopened = ReplayStore::open_with_retention(dir.path(), Some(20)).unwrap();
+    assert!(reopened.episode(ReplayEpisodeId::new(0)).unwrap().is_none());
+    let sampled = reopened
+        .sample_rows(SampleConfig {
+            batch: std::num::NonZeroUsize::new(8).unwrap(),
+            window_rows: std::num::NonZeroU64::new(1_000_000).unwrap(),
+            seed: 7,
+        })
+        .unwrap();
+    assert_eq!(sampled.len(), 8);
 }

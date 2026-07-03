@@ -50,6 +50,7 @@ class SelfplayConfig:
     reference: str = "self-average"
     reference_ema_decay: float = 0.99
     max_row_backlog: int = 200_000
+    replay_retain: int = 0
     eval_device: str = "cuda:0"
     eval_poll_interval: float = 10.0
     seed: int = 0
@@ -486,6 +487,11 @@ def spawn_torch_selfplay(config: RunConfig) -> subprocess.Popen[bytes]:
             str(config.trainer.batch),
             "--replay-backlog",
             str(config.selfplay.max_row_backlog),
+            *(
+                ["--replay-retain", str(config.selfplay.replay_retain)]
+                if config.selfplay.replay_retain
+                else []
+            ),
         ],
         # Selfplay spawns the evaluator child; a new session lets kill_child
         # take down the whole group instead of orphaning the evaluator (and

@@ -63,6 +63,7 @@ fn replay_serve_returns_feature_batch_and_targets() {
         serve_socket: None,
         serve_max_batch: 512,
         replay_backlog: None,
+        replay_retain: None,
     })
     .unwrap();
     let expected_schema_config = ReplayStore::open(dir.path())
@@ -153,6 +154,7 @@ fn replay_serve_rejects_featureless_store() {
         serve_socket: None,
         serve_max_batch: 512,
         replay_backlog: None,
+        replay_retain: None,
     })
     .unwrap();
 

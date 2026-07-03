@@ -1,14 +1,18 @@
 use crate::error::{ReplayError, ReplayResult};
 use crate::keys::{
-    CF_EPISODES, CF_META, CF_ROW_INDEX, CF_ROWS, META_CONSUMED_ROWS, META_EPISODES_STOPPED,
-    META_FEATURE_SCHEMA, META_NEXT_EPISODE_SEQ, META_PRODUCED_ROWS, META_SCHEMA_VERSION,
-    SCHEMA_VERSION, decode_episode_from_row_key, decode_u32, decode_u64, decode_u64_key,
-    encode_u32, encode_u64, episode_key, row_index_key, row_key,
+    CF_EPISODES, CF_META, CF_ROW_INDEX, CF_ROWS, META_CONSUMED_ROWS, META_DELETED_FLOOR,
+    META_EPISODES_STOPPED, META_FEATURE_SCHEMA, META_NEXT_EPISODE_SEQ, META_PRODUCED_ROWS,
+    META_RETAINED_FLOOR, META_SCHEMA_VERSION, SCHEMA_VERSION, decode_episode_from_row_key,
+    decode_step_from_row_key, decode_u32, decode_u64, decode_u64_key, encode_u32, encode_u64,
+    episode_key, row_index_key, row_key,
 };
 use crate::records::{ReplayEpisodeId, ReplayEpisodeRecord, ReplayRow, validate_episode};
 use crate::sample::{ReplayRng, SampleConfig};
 use gz_features::{FeatureSchema, FeatureSchemaConfig};
-use rocksdb::{ColumnFamilyDescriptor, DB, IteratorMode, Options, WriteBatch};
+use rocksdb::{
+    BlockBasedOptions, Cache, ColumnFamilyDescriptor, DB, DBCompressionType, IteratorMode, Options,
+    WriteBatch,
+};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
@@ -20,6 +24,9 @@ pub struct ReplayStore {
     episodes_stopped: AtomicU64,
     produced_rows: AtomicU64,
     consumed_rows: AtomicU64,
+    /// Rows below this sequence may be gone; sampling clamps to it.
+    retained_floor: AtomicU64,
+    retain_rows: Option<u64>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -30,6 +37,13 @@ pub struct ReplayCounters {
 
 impl ReplayStore {
     pub fn open(path: &Path) -> ReplayResult<Self> {
+        Self::open_with_retention(path, None)
+    }
+
+    /// `retain_rows` bounds the store: once produced rows exceed the bound
+    /// by 25%, whole episodes below `produced - retain_rows` are
+    /// range-deleted and the sampling window clamps to the new floor.
+    pub fn open_with_retention(path: &Path, retain_rows: Option<u64>) -> ReplayResult<Self> {
         let db = Arc::new(open_db(path)?);
         ensure_schema(&db)?;
 
@@ -37,6 +51,7 @@ impl ReplayStore {
         let produced_rows = recover_next_row_seq(&db)?;
         let consumed_rows = read_meta_u64(&db, META_CONSUMED_ROWS)?.unwrap_or(0);
         let episodes_stopped = read_meta_u64(&db, META_EPISODES_STOPPED)?.unwrap_or(0);
+        let retained_floor = read_meta_u64(&db, META_RETAINED_FLOOR)?.unwrap_or(0);
         write_meta_u64(&db, META_NEXT_EPISODE_SEQ, next_episode_seq)?;
         write_meta_u64(&db, META_PRODUCED_ROWS, produced_rows)?;
 
@@ -47,6 +62,8 @@ impl ReplayStore {
             episodes_stopped: AtomicU64::new(episodes_stopped),
             produced_rows: AtomicU64::new(produced_rows),
             consumed_rows: AtomicU64::new(consumed_rows),
+            retained_floor: AtomicU64::new(retained_floor),
+            retain_rows,
         })
     }
 
@@ -107,8 +124,82 @@ impl ReplayStore {
         self.next_episode_seq
             .store(next_episode_seq, Ordering::Release);
         self.produced_rows.store(produced_rows, Ordering::Release);
+        self.enforce_retention(produced_rows)?;
 
         Ok(id)
+    }
+
+    /// Runs under the append write lock. Two floors make this safe against
+    /// lock-free samplers: keys are only deleted below the floor published
+    /// on the PREVIOUS cycle, and any in-flight sampler already clamped to
+    /// at least that floor before picking row sequences.
+    fn enforce_retention(&self, produced_rows: u64) -> ReplayResult<()> {
+        let Some(retain) = self.retain_rows else {
+            return Ok(());
+        };
+        let floor = self.retained_floor.load(Ordering::Acquire);
+        if produced_rows.saturating_sub(floor) <= retain + retain / 4 {
+            return Ok(());
+        }
+
+        let row_index = self.cf(CF_ROW_INDEX)?;
+        let target = produced_rows - retain;
+        let target_key = self
+            .db
+            .get_cf(&row_index, row_index_key(target))?
+            .ok_or_else(|| ReplayError::storage("missing row index entry at retention target"))?;
+        let step = decode_step_from_row_key(&target_key)
+            .ok_or_else(|| ReplayError::storage("corrupt row key at retention target"))?;
+        // Align the floor to the cutoff episode's first row so episodes are
+        // deleted whole.
+        let new_floor = target - u64::from(step);
+        if new_floor <= floor {
+            return Ok(());
+        }
+
+        let deleted = read_meta_u64(&self.db, META_DELETED_FLOOR)?.unwrap_or(0);
+        let deleted_episode = if deleted == 0 {
+            0
+        } else {
+            let key = self
+                .db
+                .get_cf(&row_index, row_index_key(deleted))?
+                .ok_or_else(|| ReplayError::storage("missing row index entry at deleted floor"))?;
+            decode_episode_from_row_key(&key)
+                .ok_or_else(|| ReplayError::storage("corrupt row key at deleted floor"))?
+        };
+        let floor_episode = if floor == 0 {
+            0
+        } else {
+            let key = self
+                .db
+                .get_cf(&row_index, row_index_key(floor))?
+                .ok_or_else(|| ReplayError::storage("missing row index entry at retained floor"))?;
+            decode_episode_from_row_key(&key)
+                .ok_or_else(|| ReplayError::storage("corrupt row key at retained floor"))?
+        };
+
+        let rows = self.cf(CF_ROWS)?;
+        let episodes = self.cf(CF_EPISODES)?;
+        let mut batch = WriteBatch::default();
+        batch.delete_range_cf(&row_index, row_index_key(deleted), row_index_key(floor));
+        batch.delete_range_cf(
+            &rows,
+            row_key(deleted_episode, 0),
+            row_key(floor_episode, 0),
+        );
+        batch.delete_range_cf(
+            &episodes,
+            episode_key(deleted_episode),
+            episode_key(floor_episode),
+        );
+        let meta = self.cf(CF_META)?;
+        batch.put_cf(&meta, META_DELETED_FLOOR, encode_u64(floor));
+        batch.put_cf(&meta, META_RETAINED_FLOOR, encode_u64(new_floor));
+        self.db.write(batch)?;
+        self.retained_floor.store(new_floor, Ordering::Release);
+
+        Ok(())
     }
 
     pub fn ensure_feature_schema(&self, config: &FeatureSchemaConfig) -> ReplayResult<()> {
@@ -153,12 +244,13 @@ impl ReplayStore {
         // Lock-free against producers: appends commit their WriteBatch before
         // publishing produced_rows, so every sampled row_seq is fully visible.
         let produced = self.produced_rows.load(Ordering::Acquire);
+        let floor = self.retained_floor.load(Ordering::Acquire);
 
-        if produced == 0 {
+        if produced == floor || produced == 0 {
             return Err(ReplayError::Empty);
         }
 
-        let window = config.window_rows.get().min(produced);
+        let window = config.window_rows.get().min(produced - floor);
         let start = produced - window;
         let mut rng = ReplayRng::new(config.seed);
         let row_index = self.cf(CF_ROW_INDEX)?;
@@ -273,12 +365,34 @@ fn open_db(path: &Path) -> ReplayResult<DB> {
     let mut options = Options::default();
     options.create_if_missing(true);
     options.create_missing_column_families(true);
+    // Selfplay writes tens of MB/s of large rows continuously; defaults
+    // (64 MB memtables, 2 background jobs, 8 MB cache) accumulate
+    // compaction debt until reads and appends stall mid-run.
+    options.increase_parallelism(8);
+    options.set_max_background_jobs(8);
+
+    let cache = Cache::new_lru_cache(2 * 1024 * 1024 * 1024);
+    let mut block = BlockBasedOptions::default();
+    block.set_block_cache(&cache);
+
+    let mut value_cf = Options::default();
+    value_cf.set_write_buffer_size(256 * 1024 * 1024);
+    value_cf.set_target_file_size_base(128 * 1024 * 1024);
+    value_cf.set_level_compaction_dynamic_level_bytes(true);
+    value_cf.set_compression_type(DBCompressionType::Lz4);
+    value_cf.set_block_based_table_factory(&block);
+
+    let mut index_cf = Options::default();
+    index_cf.set_write_buffer_size(64 * 1024 * 1024);
+    index_cf.set_level_compaction_dynamic_level_bytes(true);
+    index_cf.set_compression_type(DBCompressionType::Lz4);
+    index_cf.set_block_based_table_factory(&block);
 
     let descriptors = [
         ColumnFamilyDescriptor::new(CF_META, Options::default()),
-        ColumnFamilyDescriptor::new(CF_EPISODES, Options::default()),
-        ColumnFamilyDescriptor::new(CF_ROWS, Options::default()),
-        ColumnFamilyDescriptor::new(CF_ROW_INDEX, Options::default()),
+        ColumnFamilyDescriptor::new(CF_EPISODES, index_cf.clone()),
+        ColumnFamilyDescriptor::new(CF_ROWS, value_cf),
+        ColumnFamilyDescriptor::new(CF_ROW_INDEX, index_cf),
     ];
 
     DB::open_cf_descriptors(&options, path, descriptors).map_err(ReplayError::from)
