@@ -115,6 +115,11 @@ class TorchBackend:
             return
         self._active = pending
         self.manifest = pending.manifest
+        print(
+            f"event=checkpoint_swapped model_version={pending.model_version.hex()}",
+            file=sys.stderr,
+            flush=True,
+        )
 
     def stop_polling(self) -> None:
         self._stop_polling.set()
