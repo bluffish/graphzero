@@ -31,6 +31,9 @@ seed = 0
 max_batch = 16
 python_dir = "python"
 
+[wandb]
+project = "graphzero"
+
 [paths]
 replay_dir = "runs/train-whittle/replay"
 checkpoint_dir = "runs/train-whittle/checkpoints"

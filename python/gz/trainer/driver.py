@@ -4,9 +4,10 @@ import json
 import os
 import signal
 import subprocess
+import sys
 import time
 import tomllib
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 
 from gz.model.exphormer import ArchConfig, build_model
@@ -54,6 +55,14 @@ class SelfplayConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class WandbConfig:
+    project: str = ""
+    entity: str = ""
+    run_name: str = ""
+    mode: str = ""
+
+
+@dataclass(frozen=True, slots=True)
 class PathsConfig:
     replay_dir: Path
     checkpoint_dir: Path
@@ -67,13 +76,14 @@ class RunConfig:
     trainer: TrainerConfig
     selfplay: SelfplayConfig
     paths: PathsConfig
+    wandb: WandbConfig
 
 
 def run(config_path: str | Path) -> None:
     config = load_config(config_path)
     for path in (config.paths.replay_dir, config.paths.checkpoint_dir, config.paths.run_dir):
         path.mkdir(parents=True, exist_ok=True)
-    metrics = MetricsWriter(config.paths.run_dir / "metrics.jsonl")
+    metrics = MetricsWriter(config.paths.run_dir / "metrics.jsonl", WandbRun.start(config))
 
     bootstrap_selfplay(config)
     serve = spawn_replay_serve(config)
@@ -125,35 +135,39 @@ def run(config_path: str | Path) -> None:
                 grad_clip=config.trainer.grad_clip,
             ),
         )
+        window = PerfWindow()
         for step in range(config.trainer.total_steps):
             check_child(selfplay, "selfplay")
+            sample_started = time.perf_counter()
             result = sampler.sample(
                 config.trainer.batch,
                 config.trainer.window_rows,
                 step_seed(config.trainer.seed, step),
             )
+            train_started = time.perf_counter()
             metrics_record = loop.train_step(stager.copy(result.batch, result.targets))
             ema.update(model)
+            window.record(sample_started, train_started, time.perf_counter())
             if step % config.trainer.log_interval == 0:
                 produced = sampler.refresh().produced_rows
-                metrics.write(
-                    {
-                        "event": "step",
-                        "timestamp": time.time(),
-                        "step": metrics_record.step,
-                        "policy_loss": metrics_record.policy_loss,
-                        "value_loss": metrics_record.value_loss,
-                        "loss": metrics_record.loss,
-                        "grad_norm": metrics_record.grad_norm,
-                        "lr": metrics_record.lr,
-                        "value_accuracy": metrics_record.value_accuracy,
-                        "fraction_valid": metrics_record.fraction_valid,
-                        "label_mean": metrics_record.label_mean,
-                        "max_reward": metrics_record.max_reward,
-                        "produced_rows": produced,
-                        "samples_per_row": ((step + 1) * config.trainer.batch / produced) if produced else 0.0,
-                    }
-                )
+                record = {
+                    "event": "step",
+                    "timestamp": time.time(),
+                    "step": metrics_record.step,
+                    "policy_loss": metrics_record.policy_loss,
+                    "value_loss": metrics_record.value_loss,
+                    "loss": metrics_record.loss,
+                    "grad_norm": metrics_record.grad_norm,
+                    "lr": metrics_record.lr,
+                    "value_accuracy": metrics_record.value_accuracy,
+                    "fraction_valid": metrics_record.fraction_valid,
+                    "label_mean": metrics_record.label_mean,
+                    "max_reward": metrics_record.max_reward,
+                    "produced_rows": produced,
+                    "samples_per_row": ((step + 1) * config.trainer.batch / produced) if produced else 0.0,
+                }
+                record.update(window.drain(produced))
+                metrics.write(record)
             if (step + 1) % config.trainer.publish_interval == 0:
                 manifest = publish_ema(
                     config.paths.checkpoint_dir,
@@ -191,25 +205,137 @@ def run(config_path: str | Path) -> None:
                 }
             )
     except BaseException:
+        # wandb's atexit hook marks the run crashed; only the clean path
+        # finishes it explicitly.
         kill_child(selfplay)
         raise
     else:
         kill_child(selfplay)
+        metrics.finish()
 
 
 class MetricsWriter:
-    def __init__(self, path: Path) -> None:
+    def __init__(self, path: Path, wandb_run: WandbRun | None = None) -> None:
         self.handle = path.open("a", encoding="utf-8")
+        self.wandb_run = wandb_run
 
     def write(self, record: dict[str, object]) -> None:
         self.handle.write(json.dumps(record, sort_keys=True, separators=(",", ":")) + "\n")
         self.handle.flush()
+        if self.wandb_run is not None:
+            self.wandb_run.write(record)
+
+    def finish(self) -> None:
+        self.handle.close()
+        if self.wandb_run is not None:
+            self.wandb_run.finish()
+
+
+class PerfWindow:
+    """Accumulates per-step timings between metric writes."""
+
+    def __init__(self) -> None:
+        self.window_started = time.perf_counter()
+        self.last_produced = 0
+        self.steps = 0
+        self.sample_seconds = 0.0
+        self.train_seconds = 0.0
+
+    def record(self, sample_started: float, train_started: float, finished: float) -> None:
+        self.steps += 1
+        self.sample_seconds += train_started - sample_started
+        self.train_seconds += finished - train_started
+
+    def drain(self, produced: int) -> dict[str, float]:
+        now = time.perf_counter()
+        elapsed = max(now - self.window_started, 1e-9)
+        steps = max(self.steps, 1)
+        perf = {
+            "steps_per_s": self.steps / elapsed,
+            "rows_per_s": max(produced - self.last_produced, 0) / elapsed if self.last_produced else 0.0,
+            "sample_ms": 1000.0 * self.sample_seconds / steps,
+            "train_ms": 1000.0 * self.train_seconds / steps,
+        }
+        self.window_started = now
+        self.last_produced = produced
+        self.steps = 0
+        self.sample_seconds = 0.0
+        self.train_seconds = 0.0
+        return perf
+
+
+# JSONL keys -> grouped wandb keys. Anything unlisted stays out of wandb,
+# which is the over-logging guard: extending the JSONL never widens wandb.
+WANDB_KEYS = {
+    "policy_loss": "train/policy_loss",
+    "value_loss": "train/value_loss",
+    "loss": "train/loss",
+    "grad_norm": "train/grad_norm",
+    "lr": "train/lr",
+    "value_accuracy": "train/value_accuracy",
+    "fraction_valid": "train/fraction_valid",
+    "label_mean": "train/label_mean",
+    "max_reward": "train/max_reward",
+    "steps_per_s": "perf/steps_per_s",
+    "rows_per_s": "perf/rows_per_s",
+    "sample_ms": "perf/sample_ms",
+    "train_ms": "perf/train_ms",
+    "produced_rows": "perf/produced_rows",
+    "samples_per_row": "perf/samples_per_row",
+}
+
+
+class WandbRun:
+    """Optional wandb mirror of the metrics JSONL. Never load-bearing:
+    init failure logs one line and the run proceeds without it."""
+
+    def __init__(self, run: object) -> None:
+        self.run = run
+        self.publishes = 0
+
+    @classmethod
+    def start(cls, config: RunConfig) -> WandbRun | None:
+        if not config.wandb.project:
+            return None
+        try:
+            import wandb
+
+            run = wandb.init(
+                project=config.wandb.project,
+                entity=config.wandb.entity or None,
+                name=config.wandb.run_name or config.paths.run_dir.name,
+                mode=config.wandb.mode or None,
+                config={
+                    "trainer": asdict(config.trainer),
+                    "selfplay": asdict(config.selfplay),
+                    "run_dir": str(config.paths.run_dir),
+                },
+            )
+        except Exception as error:
+            print(f"event=wandb_disabled error={error}", file=sys.stderr, flush=True)
+            return None
+        return cls(run)
+
+    def write(self, record: dict[str, object]) -> None:
+        if record.get("event") == "step":
+            payload = {WANDB_KEYS[k]: v for k, v in record.items() if k in WANDB_KEYS}
+            self.run.log(payload, step=record["step"])
+        elif record.get("event") == "publish":
+            self.publishes += 1
+            self.run.log(
+                {"publish/count": self.publishes, "publish/training_step": record["training_step"]},
+                step=record["training_step"],
+            )
+
+    def finish(self) -> None:
+        self.run.finish()
 
 
 def load_config(path: str | Path) -> RunConfig:
     data = tomllib.loads(Path(path).read_text(encoding="utf-8"))
     trainer = _dataclass_from_dict(TrainerConfig, data.get("trainer", {}))
     selfplay = _dataclass_from_dict(SelfplayConfig, data.get("selfplay", {}))
+    wandb = _dataclass_from_dict(WandbConfig, data.get("wandb", {}))
     raw_paths = data.get("paths", {})
     if not isinstance(raw_paths, dict):
         raise ValueError("[paths] must be a table")
@@ -235,6 +361,7 @@ def load_config(path: str | Path) -> RunConfig:
             sample_socket=sample_socket,
             graphzero_bin=graphzero_bin,
         ),
+        wandb=wandb,
     )
 
 

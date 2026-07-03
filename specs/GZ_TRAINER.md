@@ -174,7 +174,12 @@ per-root reward EMA / persistence           -> single-graph runs at scale
 child restart policy in the supervisor      -> long runs die to transients
 remote trainer host                         -> second box exists (the
                                                couplings already permit it)
-wandb                                       -> humans over JSONL
+wandb                                       -> implemented: optional
+                                               [wandb] project mirror of
+                                               the step/publish JSONL
+                                               (train/*, perf/*, publish/*
+                                               groups); JSONL stays the
+                                               source of truth
 DDP                                         -> one training GPU saturated
 ```
 
