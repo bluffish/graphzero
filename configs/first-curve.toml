@@ -1,0 +1,36 @@
+[trainer]
+lr = 0.0003
+warmup_steps = 200
+batch = 256
+window_rows = 200000
+total_steps = 5000
+publish_interval = 200
+value_weight = 1.0
+ema_decay = 0.999
+grad_clip = 1.0
+min_startup_rows = 256
+seed = 0
+device = "cuda:1"
+startup_timeout = 120.0
+reconnect_limit = 5
+log_interval = 1
+step_sleep = 0.0
+bootstrap_episodes = 64
+
+[selfplay]
+lanes = 2
+workers_per_lane = 8
+simulations = 8
+max_steps = 8
+reference = "self-average"
+reference_ema_decay = 0.99
+max_row_backlog = 200000
+eval_device = "cuda:0"
+eval_poll_interval = 10.0
+seed = 0
+max_batch = 16
+python_dir = "python"
+
+[paths]
+run_dir = "runs/first-curve"
+graphzero_bin = "target/release/graphzero"

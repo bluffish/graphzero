@@ -218,6 +218,13 @@ def load_config(path: str | Path) -> RunConfig:
     checkpoint_dir = Path(str(raw_paths.get("checkpoint_dir", run_dir / "checkpoints")))
     sample_socket = Path(str(raw_paths.get("sample_socket", run_dir / "sample.sock")))
     graphzero_bin = str(raw_paths.get("graphzero_bin", os.environ.get("GRAPHZERO_BIN", "graphzero")))
+    # Children run in their own working directories (the evaluator runs in
+    # python_dir), so relative config paths must be pinned to the trainer's
+    # cwd before they cross a process boundary.
+    run_dir = run_dir.absolute()
+    replay_dir = replay_dir.absolute()
+    checkpoint_dir = checkpoint_dir.absolute()
+    sample_socket = sample_socket.absolute()
     return RunConfig(
         trainer=trainer,
         selfplay=selfplay,
