@@ -1,4 +1,4 @@
-pub(crate) const SCHEMA_VERSION: u32 = 4;
+pub(crate) const SCHEMA_VERSION: u32 = 5;
 
 pub(crate) const CF_META: &str = "meta";
 pub(crate) const CF_EPISODES: &str = "episodes";
@@ -6,6 +6,7 @@ pub(crate) const CF_ROWS: &str = "rows";
 pub(crate) const CF_ROW_INDEX: &str = "row_index";
 
 pub(crate) const META_SCHEMA_VERSION: &[u8] = b"schema_version";
+pub(crate) const META_EPISODES_STOPPED: &[u8] = b"episodes_stopped";
 pub(crate) const META_NEXT_EPISODE_SEQ: &[u8] = b"next_episode_seq";
 pub(crate) const META_PRODUCED_ROWS: &[u8] = b"produced_rows";
 pub(crate) const META_CONSUMED_ROWS: &[u8] = b"consumed_rows";

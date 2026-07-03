@@ -9,7 +9,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::time::Duration;
 
-pub const SAMPLE_PROTOCOL_VERSION: u32 = 1;
+pub const SAMPLE_PROTOCOL_VERSION: u32 = 2;
 
 const MAX_FRAME: usize = 256 * 1024 * 1024;
 const FRAME_HELLO: u8 = 1;
@@ -124,10 +124,10 @@ impl ReplaySampleServer {
     fn accept_one(&mut self) -> Result<(), String> {
         let (mut stream, _) = self.listener.accept().map_err(|error| error.to_string())?;
         stream
-            .set_read_timeout(Some(Duration::from_secs(30)))
+            .set_read_timeout(Some(Duration::from_secs(300)))
             .map_err(|error| error.to_string())?;
         stream
-            .set_write_timeout(Some(Duration::from_secs(30)))
+            .set_write_timeout(Some(Duration::from_secs(300)))
             .map_err(|error| error.to_string())?;
         self.handle_client(&mut stream)
     }
@@ -210,11 +210,14 @@ impl ReplaySampleServer {
         let mut schema_config = Vec::new();
         encode_feature_schema_config(self.collator.schema().config(), &mut schema_config)
             .map_err(|_| (ERROR_ENCODING, "failed to encode schema config"))?;
-        let mut payload = Vec::with_capacity(48 + schema_config.len());
+        let (episodes, episodes_stopped) = self.store.episode_counters();
+        let mut payload = Vec::with_capacity(64 + schema_config.len());
         payload.extend_from_slice(&SAMPLE_PROTOCOL_VERSION.to_le_bytes());
         payload.extend_from_slice(self.collator.schema().hash().as_bytes());
         payload.extend_from_slice(&(self.max_batch.get() as u32).to_le_bytes());
         payload.extend_from_slice(&self.store.counters().produced_rows.to_le_bytes());
+        payload.extend_from_slice(&episodes.to_le_bytes());
+        payload.extend_from_slice(&episodes_stopped.to_le_bytes());
         payload.extend_from_slice(&schema_config);
         write_frame(stream, write_buf, FRAME_HELLO_ACK, &[&payload])
             .map_err(|_| (ERROR_PROTOCOL, "failed to write HELLO_ACK"))

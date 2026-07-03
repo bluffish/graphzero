@@ -43,8 +43,10 @@ class SelfplayConfig:
     lanes: int = 2
     workers_per_lane: int = 8
     simulations: int = 8
+    max_considered: int = 16
     gumbel_scale: float = 0.0
     max_steps: int = 8
+    max_candidates: int = 255
     reference: str = "self-average"
     reference_ema_decay: float = 0.99
     max_row_backlog: int = 200_000
@@ -151,7 +153,9 @@ def run(config_path: str | Path) -> None:
             ema.update(model)
             window.record(sample_started, train_started, time.perf_counter())
             if step % config.trainer.log_interval == 0:
-                produced = sampler.refresh().produced_rows
+                ack = sampler.refresh()
+                produced = ack.produced_rows
+                stop_rate = ack.episodes_stopped / ack.episodes if ack.episodes else 0.0
                 record = {
                     "event": "step",
                     "timestamp": time.time(),
@@ -164,9 +168,11 @@ def run(config_path: str | Path) -> None:
                     "value_accuracy": metrics_record.value_accuracy,
                     "fraction_valid": metrics_record.fraction_valid,
                     "label_mean": metrics_record.label_mean,
-                    "max_reward": metrics_record.max_reward,
+                    "terminal_cost_mean": metrics_record.terminal_cost_mean,
+                    "terminal_cost_best": metrics_record.terminal_cost_best,
                     "produced_rows": produced,
                     "samples_per_row": ((step + 1) * config.trainer.batch / produced) if produced else 0.0,
+                    "stop_rate": stop_rate,
                 }
                 record.update(window.drain(produced))
                 metrics.write(record)
@@ -277,7 +283,9 @@ WANDB_KEYS = {
     "value_accuracy": "train/value_accuracy",
     "fraction_valid": "train/fraction_valid",
     "label_mean": "train/label_mean",
-    "max_reward": "train/max_reward",
+    "terminal_cost_mean": "selfplay/terminal_cost_mean",
+    "terminal_cost_best": "selfplay/terminal_cost_best",
+    "stop_rate": "selfplay/stop_rate",
     "steps_per_s": "perf/steps_per_s",
     "rows_per_s": "perf/rows_per_s",
     "sample_ms": "perf/sample_ms",
@@ -334,6 +342,16 @@ class WandbRun:
         self.run.finish()
 
 
+def _validate(config: RunConfig) -> RunConfig:
+    ceiling = config.trainer.bootstrap_episodes * config.selfplay.max_steps
+    if ceiling < config.trainer.min_startup_rows:
+        raise ValueError(
+            f"bootstrap_episodes x max_steps ({ceiling}) cannot reach "
+            f"min_startup_rows ({config.trainer.min_startup_rows}); startup would hang"
+        )
+    return config
+
+
 def load_config(path: str | Path) -> RunConfig:
     data = tomllib.loads(Path(path).read_text(encoding="utf-8"))
     trainer = _dataclass_from_dict(TrainerConfig, data.get("trainer", {}))
@@ -355,7 +373,7 @@ def load_config(path: str | Path) -> RunConfig:
     replay_dir = replay_dir.absolute()
     checkpoint_dir = checkpoint_dir.absolute()
     sample_socket = sample_socket.absolute()
-    return RunConfig(
+    return _validate(RunConfig(
         trainer=trainer,
         selfplay=selfplay,
         paths=PathsConfig(
@@ -367,7 +385,7 @@ def load_config(path: str | Path) -> RunConfig:
         ),
         wandb=wandb,
         arch=arch,
-    )
+    ))
 
 
 def bootstrap_selfplay(config: RunConfig) -> None:
@@ -392,6 +410,12 @@ def bootstrap_selfplay(config: RunConfig) -> None:
         str(config.selfplay.max_steps),
         "--simulations",
         str(config.selfplay.simulations),
+        "--max-considered",
+        str(config.selfplay.max_considered),
+        "--gumbel-scale",
+        str(config.selfplay.gumbel_scale),
+        "--max-candidates",
+        str(config.selfplay.max_candidates),
         "--max-batch",
         str(config.selfplay.max_batch),
     ]
@@ -446,8 +470,12 @@ def spawn_torch_selfplay(config: RunConfig) -> subprocess.Popen[bytes]:
             str(config.selfplay.max_steps),
             "--simulations",
             str(config.selfplay.simulations),
+            "--max-considered",
+            str(config.selfplay.max_considered),
             "--gumbel-scale",
             str(config.selfplay.gumbel_scale),
+            "--max-candidates",
+            str(config.selfplay.max_candidates),
             "--max-batch",
             str(config.selfplay.max_batch),
             "--serve-socket",

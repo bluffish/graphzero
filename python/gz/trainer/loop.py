@@ -27,7 +27,8 @@ class StepMetrics:
     value_accuracy: float
     fraction_valid: float
     label_mean: float
-    max_reward: float
+    terminal_cost_mean: float
+    terminal_cost_best: float
 
 
 class TrainerLoop:
@@ -68,7 +69,11 @@ class TrainerLoop:
                 value_accuracy = value_raw.new_tensor(0.0)
                 label_mean = value_raw.new_tensor(0.0)
             fraction_valid = valid.float().mean()
-            max_reward = batch.reward[row_mask].max() if batch.row_count else batch.reward.new_tensor(0.0)
+            # Whittle reward is -(measured cost); report the cost directly.
+            # Row-weighted: long episodes contribute more rows to the batch.
+            costs = -batch.reward[row_mask]
+            terminal_cost_mean = costs.mean() if batch.row_count else costs.new_tensor(0.0)
+            terminal_cost_best = costs.min() if batch.row_count else costs.new_tensor(0.0)
 
         return StepMetrics(
             step=self.step_index,
@@ -80,7 +85,8 @@ class TrainerLoop:
             value_accuracy=float(value_accuracy.detach().cpu()),
             fraction_valid=float(fraction_valid.detach().cpu()),
             label_mean=float(label_mean.detach().cpu()),
-            max_reward=float(max_reward.detach().cpu()),
+            terminal_cost_mean=float(terminal_cost_mean.detach().cpu()),
+            terminal_cost_best=float(terminal_cost_best.detach().cpu()),
         )
 
 

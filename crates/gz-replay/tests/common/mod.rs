@@ -123,6 +123,7 @@ pub fn episode_with_rows(row_count: usize) -> (ReplayEpisodeRecord, Vec<ReplayRo
         outcome: ReplayOutcome {
             value_target: Some(1.0),
             learner_reward: 5.0,
+            stopped: false,
             reference: Some(ReplayReference {
                 kind: ReplayReferenceKind::RootBaseline,
                 reward: 4.0,

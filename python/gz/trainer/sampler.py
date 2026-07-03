@@ -11,12 +11,13 @@ from gz.codec import BatchView, FeatureSchemaConfig, TargetsView
 from gz.common import FeatureSchemaHash
 from gz.proto import (
     ENCODING_VERSION,
-    PROTOCOL_VERSION,
     ProtocolError,
     decode_error,
     read_frame,
     write_frame,
 )
+
+SAMPLE_PROTOCOL_VERSION = 2
 
 FRAME_HELLO = 1
 FRAME_HELLO_ACK = 2
@@ -41,6 +42,8 @@ class SampleAck:
     feature_schema_hash: FeatureSchemaHash
     max_batch: int
     produced_rows: int
+    episodes: int
+    episodes_stopped: int
     feature_schema: FeatureSchemaConfig
 
 
@@ -87,7 +90,7 @@ class SampleClient:
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
         sock.connect(str(self.socket_path))
         self.sock = sock
-        write_frame(sock, FRAME_HELLO, struct.pack("<II", PROTOCOL_VERSION, ENCODING_VERSION))
+        write_frame(sock, FRAME_HELLO, struct.pack("<II", SAMPLE_PROTOCOL_VERSION, ENCODING_VERSION))
         frame_type, payload = read_frame(sock, self.read_buf)
         if frame_type == FRAME_ERROR:
             code, message = decode_error(payload)
@@ -135,7 +138,7 @@ class SampleClient:
     def _refresh_connected(self) -> SampleAck:
         if self.sock is None:
             return self.connect()
-        write_frame(self.sock, FRAME_HELLO, struct.pack("<II", PROTOCOL_VERSION, ENCODING_VERSION))
+        write_frame(self.sock, FRAME_HELLO, struct.pack("<II", SAMPLE_PROTOCOL_VERSION, ENCODING_VERSION))
         frame_type, payload = read_frame(self.sock, self.read_buf)
         if frame_type == FRAME_ERROR:
             code, message = decode_error(payload)
@@ -182,18 +185,22 @@ class SampleClient:
 
 
 def decode_ack(payload: memoryview) -> SampleAck:
-    if len(payload) < 48:
+    if len(payload) < 64:
         raise SampleError("sample HELLO_ACK truncated")
     protocol_version = struct.unpack_from("<I", payload, 0)[0]
-    if protocol_version != PROTOCOL_VERSION:
+    if protocol_version != SAMPLE_PROTOCOL_VERSION:
         raise SampleError("sample protocol version mismatch")
     max_batch = struct.unpack_from("<I", payload, 36)[0]
     produced_rows = struct.unpack_from("<Q", payload, 40)[0]
+    episodes = struct.unpack_from("<Q", payload, 48)[0]
+    episodes_stopped = struct.unpack_from("<Q", payload, 56)[0]
     return SampleAck(
         feature_schema_hash=FeatureSchemaHash.from_bytes(payload[4:36]),
         max_batch=max_batch,
         produced_rows=produced_rows,
-        feature_schema=FeatureSchemaConfig.decode(payload[48:]),
+        episodes=episodes,
+        episodes_stopped=episodes_stopped,
+        feature_schema=FeatureSchemaConfig.decode(payload[64:]),
     )
 
 

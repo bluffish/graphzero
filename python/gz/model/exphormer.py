@@ -452,8 +452,11 @@ def _subject_pool(torch: object, h: object, node_mask: object, action_subjects: 
     valid = subject_index.reshape(1, 1, s) < subject_count.unsqueeze(-1)
     valid = valid & (action_subjects < node_mask.sum(dim=1).reshape(b, 1, 1))
     safe = action_subjects.clamp(0, n - 1)
-    expanded = h.unsqueeze(1).expand(b, a, n, d)
-    gathered = torch.gather(expanded, 2, safe.unsqueeze(-1).expand(b, a, s, d))
+    # Gather over h's node dim directly: routing the gather through an
+    # (b, a, n, d) expand made the backward materialize that full tensor
+    # (tens of GiB at wide action masks) before reducing it.
+    flat = safe.reshape(b, a * s, 1).expand(b, a * s, d)
+    gathered = torch.gather(h, 1, flat).reshape(b, a, s, d)
     weight = valid.unsqueeze(-1).to(h.dtype)
     denom = weight.sum(dim=2).clamp_min(1.0)
     return (gathered * weight).sum(dim=2) / denom

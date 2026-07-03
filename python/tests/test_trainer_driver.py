@@ -129,3 +129,15 @@ def test_load_config_parses_arch_table(tmp_path: Path) -> None:
     assert config.arch.dim == 64
     assert config.arch.layers == 2
     assert config.arch.heads == 4
+
+
+def test_load_config_rejects_unreachable_startup_rows(tmp_path: Path) -> None:
+    config_path = tmp_path / "run.toml"
+    config_path.write_text(
+        '[trainer]\nbootstrap_episodes = 4\nmin_startup_rows = 512\n\n'
+        '[selfplay]\nmax_steps = 8\n\n[paths]\nrun_dir = "run"\n',
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="cannot reach"):
+        load_config(config_path)

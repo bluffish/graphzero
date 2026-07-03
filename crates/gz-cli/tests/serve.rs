@@ -50,6 +50,7 @@ fn replay_serve_returns_feature_batch_and_targets() {
         seed: 5,
         max_steps: 2,
         simulations: 2,
+        max_considered: 16,
         gumbel_scale: 0.0,
         tree_reuse: false,
         max_candidates: 255,
@@ -92,7 +93,11 @@ fn replay_serve_returns_feature_batch_and_targets() {
         u64::from_le_bytes(ack[40..48].try_into().unwrap()),
         summary.rows_produced
     );
-    let schema_config = decode_feature_schema_config(&ack[48..]).unwrap();
+    let episodes = u64::from_le_bytes(ack[48..56].try_into().unwrap());
+    let stopped = u64::from_le_bytes(ack[56..64].try_into().unwrap());
+    assert_eq!(episodes, summary.episodes_appended);
+    assert!(stopped <= episodes);
+    let schema_config = decode_feature_schema_config(&ack[64..]).unwrap();
     assert_eq!(Some(schema_config), expected_schema_config);
 
     let mut sample = Vec::new();
@@ -135,6 +140,7 @@ fn replay_serve_rejects_featureless_store() {
         seed: 7,
         max_steps: 1,
         simulations: 1,
+        max_considered: 16,
         gumbel_scale: 0.0,
         tree_reuse: false,
         max_candidates: 255,

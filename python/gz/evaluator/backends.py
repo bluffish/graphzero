@@ -103,6 +103,9 @@ class TorchBackend:
             self._pending = None
         if pending is None:
             return
+        import time as _time
+
+        warm_started = _time.perf_counter()
         try:
             # CUDA graph capture (reduce-overhead) only works on the serving
             # thread, so the loader publishes the slot unwarmed and warmup
@@ -115,8 +118,14 @@ class TorchBackend:
             return
         self._active = pending
         self.manifest = pending.manifest
+        torch = _torch()
+        allocated = (
+            torch.cuda.memory_allocated(self.device) if self.device.type == "cuda" else 0
+        )
         print(
-            f"event=checkpoint_swapped model_version={pending.model_version.hex()}",
+            f"event=checkpoint_swapped model_version={pending.model_version.hex()}"
+            f" warm_s={_time.perf_counter() - warm_started:.2f}"
+            f" gpu_alloc_mb={allocated / 1e6:.0f}",
             file=sys.stderr,
             flush=True,
         )

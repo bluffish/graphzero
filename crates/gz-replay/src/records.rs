@@ -39,6 +39,9 @@ pub struct ReplayOutcome {
     pub value_target: Option<f32>,
     pub learner_reward: f32,
     pub reference: Option<ReplayReference>,
+    /// True when the search selected STOP; false when the episode hit the
+    /// move budget.
+    pub stopped: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]

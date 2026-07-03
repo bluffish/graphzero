@@ -1,9 +1,9 @@
 use crate::error::{ReplayError, ReplayResult};
 use crate::keys::{
-    CF_EPISODES, CF_META, CF_ROW_INDEX, CF_ROWS, META_CONSUMED_ROWS, META_FEATURE_SCHEMA,
-    META_NEXT_EPISODE_SEQ, META_PRODUCED_ROWS, META_SCHEMA_VERSION, SCHEMA_VERSION,
-    decode_episode_from_row_key, decode_u32, decode_u64, decode_u64_key, encode_u32, encode_u64,
-    episode_key, row_index_key, row_key,
+    CF_EPISODES, CF_META, CF_ROW_INDEX, CF_ROWS, META_CONSUMED_ROWS, META_EPISODES_STOPPED,
+    META_FEATURE_SCHEMA, META_NEXT_EPISODE_SEQ, META_PRODUCED_ROWS, META_SCHEMA_VERSION,
+    SCHEMA_VERSION, decode_episode_from_row_key, decode_u32, decode_u64, decode_u64_key,
+    encode_u32, encode_u64, episode_key, row_index_key, row_key,
 };
 use crate::records::{ReplayEpisodeId, ReplayEpisodeRecord, ReplayRow, validate_episode};
 use crate::sample::{ReplayRng, SampleConfig};
@@ -17,6 +17,7 @@ pub struct ReplayStore {
     db: Arc<DB>,
     write_lock: Mutex<()>,
     next_episode_seq: AtomicU64,
+    episodes_stopped: AtomicU64,
     produced_rows: AtomicU64,
     consumed_rows: AtomicU64,
 }
@@ -35,6 +36,7 @@ impl ReplayStore {
         let next_episode_seq = recover_next_episode_seq(&db)?;
         let produced_rows = recover_next_row_seq(&db)?;
         let consumed_rows = read_meta_u64(&db, META_CONSUMED_ROWS)?.unwrap_or(0);
+        let episodes_stopped = read_meta_u64(&db, META_EPISODES_STOPPED)?.unwrap_or(0);
         write_meta_u64(&db, META_NEXT_EPISODE_SEQ, next_episode_seq)?;
         write_meta_u64(&db, META_PRODUCED_ROWS, produced_rows)?;
 
@@ -42,6 +44,7 @@ impl ReplayStore {
             db,
             write_lock: Mutex::new(()),
             next_episode_seq: AtomicU64::new(next_episode_seq),
+            episodes_stopped: AtomicU64::new(episodes_stopped),
             produced_rows: AtomicU64::new(produced_rows),
             consumed_rows: AtomicU64::new(consumed_rows),
         })
@@ -95,7 +98,12 @@ impl ReplayStore {
 
         batch.put_cf(&meta, META_NEXT_EPISODE_SEQ, encode_u64(next_episode_seq));
         batch.put_cf(&meta, META_PRODUCED_ROWS, encode_u64(produced_rows));
+        let episodes_stopped =
+            self.episodes_stopped.load(Ordering::Acquire) + u64::from(record.outcome.stopped);
+        batch.put_cf(&meta, META_EPISODES_STOPPED, encode_u64(episodes_stopped));
         self.db.write(batch)?;
+        self.episodes_stopped
+            .store(episodes_stopped, Ordering::Release);
         self.next_episode_seq
             .store(next_episode_seq, Ordering::Release);
         self.produced_rows.store(produced_rows, Ordering::Release);
@@ -184,6 +192,15 @@ impl ReplayStore {
         write_meta_u64(&self.db, META_CONSUMED_ROWS, consumed_rows)?;
 
         Ok(out)
+    }
+
+    /// (episodes appended, episodes that ended by selecting STOP).
+    #[must_use]
+    pub fn episode_counters(&self) -> (u64, u64) {
+        (
+            self.next_episode_seq.load(Ordering::Acquire),
+            self.episodes_stopped.load(Ordering::Acquire),
+        )
     }
 
     #[must_use]

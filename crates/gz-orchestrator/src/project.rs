@@ -1,7 +1,7 @@
 use crate::reference::Reference;
 use gz_engine::{MeasureSummary, PortableSearchActionRef};
 use gz_replay::{ReplayEpisodeRecord, ReplayOutcome, ReplayReference, ReplayRow};
-use gz_search::GumbelEpisode;
+use gz_search::{GumbelEpisode, GumbelStopReason};
 
 pub fn project_episode<G, C>(
     episode: &GumbelEpisode<G, C>,
@@ -61,6 +61,7 @@ pub fn project_episode<G, C>(
             value_target,
             learner_reward,
             reference: replay_reference,
+            stopped: matches!(episode.stop_reason, GumbelStopReason::SelectedStop),
         },
         search_config_hash: episode.search_config_hash,
         row_count: rows.len() as u32,

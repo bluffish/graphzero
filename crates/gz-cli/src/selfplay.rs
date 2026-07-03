@@ -38,6 +38,7 @@ pub struct SelfplayConfig {
     pub seed: u64,
     pub max_steps: usize,
     pub simulations: usize,
+    pub max_considered: usize,
     pub gumbel_scale: f32,
     pub tree_reuse: bool,
     pub max_candidates: usize,
@@ -64,6 +65,7 @@ impl Default for SelfplayConfig {
             seed: 0,
             max_steps: 8,
             simulations: 8,
+            max_considered: 16,
             gumbel_scale: 0.0,
             tree_reuse: true,
             max_candidates: WHITTLE_FEATURE_MAX_ENGINE_CANDIDATES,
@@ -102,6 +104,9 @@ impl SelfplayConfig {
         }
         if self.max_candidates == 0 {
             return Err("--max-candidates must be greater than zero".to_owned());
+        }
+        if self.max_considered == 0 {
+            return Err("--max-considered must be greater than zero".to_owned());
         }
         if !self.gumbel_scale.is_finite() || self.gumbel_scale < 0.0 {
             return Err("--gumbel-scale must be zero or positive".to_owned());
@@ -399,7 +404,9 @@ fn run_process(
             .unwrap_or_else(|| PathBuf::from("python")),
         socket_path: process_socket_path(),
         ready_timeout: Duration::from_secs(10),
-        io_timeout: Duration::from_secs(30),
+        // Generous: a tripped eval timeout kills the whole selfplay run,
+        // and warm-up/compile stalls on the evaluator are legitimate.
+        io_timeout: Duration::from_secs(300),
         extra_args: config.evaluator_extra_args(),
         ..EvaluatorProcessConfig::default()
     })
@@ -518,7 +525,7 @@ fn search(engine: &WhittleEngine, config: &SelfplayConfig) -> Result<GumbelMcts,
     Ok(GumbelMcts::new(GumbelMctsConfig {
         max_steps: config.max_steps,
         simulations: nonzero(config.simulations, "simulations")?,
-        max_considered_actions: NonZeroUsize::new(16).unwrap(),
+        max_considered_actions: nonzero(config.max_considered, "max_considered")?,
         seed: config.seed,
         gumbel_scale: config.gumbel_scale,
         c_visit: 50.0,
