@@ -77,6 +77,7 @@ fn selfplay_run_writes_replay_rows() {
         max_steps: 2,
         simulations: 2,
         tree_reuse: false,
+        max_candidates: 255,
         max_batch: 4,
         evaluator: EvaluatorMode::Random,
         python_dir: None,
@@ -111,6 +112,7 @@ fn selfplay_run_supports_stub_evaluator() {
         max_steps: 2,
         simulations: 2,
         tree_reuse: false,
+        max_candidates: 255,
         max_batch: 2,
         evaluator: EvaluatorMode::Stub,
         python_dir: None,
@@ -142,6 +144,7 @@ fn selfplay_run_supports_self_average_reference() {
         max_steps: 2,
         simulations: 2,
         tree_reuse: false,
+        max_candidates: 255,
         max_batch: 1,
         evaluator: EvaluatorMode::Random,
         python_dir: None,
@@ -172,6 +175,7 @@ fn serving_config(dir: &TestDir) -> SelfplayConfig {
         max_steps: 2,
         simulations: 2,
         tree_reuse: false,
+        max_candidates: 255,
         max_batch: 1,
         evaluator: EvaluatorMode::Stub,
         python_dir: None,
@@ -322,4 +326,14 @@ fn selfplay_config_rejects_negative_poll_interval() {
 
     let error = config.validate().unwrap_err();
     assert!(error.contains("--eval-poll-interval must be"), "{error}");
+}
+
+#[test]
+fn selfplay_config_rejects_zero_max_candidates() {
+    let dir = TestDir::new();
+    let mut config = serving_config(&dir);
+    config.max_candidates = 0;
+
+    let error = config.validate().unwrap_err();
+    assert!(error.contains("--max-candidates"), "{error}");
 }

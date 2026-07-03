@@ -131,6 +131,7 @@ fn degree_zero_extractor_emits_arg_edges_only() {
         WhittleFeatureExtractorConfig {
             expander_degree: 0,
             expander_seed: 0,
+            ..WhittleFeatureExtractorConfig::default()
         },
     );
     let row = feature_row(&mut extractor, &engine, root, &candidates);
@@ -152,6 +153,7 @@ fn expander_edges_are_deterministic_bounded_and_seeded() {
     let config = WhittleFeatureExtractorConfig {
         expander_degree: 3,
         expander_seed: 11,
+        ..WhittleFeatureExtractorConfig::default()
     };
     let mut left = WhittleFeatureExtractor::with_config(&engine, config);
     let mut right = WhittleFeatureExtractor::with_config(&engine, config);
@@ -168,6 +170,7 @@ fn expander_edges_are_deterministic_bounded_and_seeded() {
         WhittleFeatureExtractorConfig {
             expander_degree: 3,
             expander_seed: 12,
+            ..WhittleFeatureExtractorConfig::default()
         },
     );
     let seeded_row = feature_row(&mut seeded, &engine, root, &candidates);

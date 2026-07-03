@@ -22,6 +22,10 @@ pub struct WhittleFeatureExtractor {
 pub struct WhittleFeatureExtractorConfig {
     pub expander_degree: u8,
     pub expander_seed: u64,
+    /// Action rows per position (engine candidates + STOP). Changing it
+    /// changes the feature schema hash: checkpoints and stores only match
+    /// runs built with the same value.
+    pub max_actions: u32,
 }
 
 impl Default for WhittleFeatureExtractorConfig {
@@ -29,6 +33,7 @@ impl Default for WhittleFeatureExtractorConfig {
         Self {
             expander_degree: DEFAULT_EXPANDER_DEGREE,
             expander_seed: 0,
+            max_actions: WHITTLE_MAX_ACTIONS,
         }
     }
 }
@@ -57,7 +62,7 @@ impl WhittleFeatureExtractor {
             action_kind_vocab_size: RULE_COUNT + 2,
             max_nodes: capacity,
             max_edges: capacity * 2 + u32::from(config.expander_degree) * capacity,
-            max_actions: WHITTLE_MAX_ACTIONS,
+            max_actions: config.max_actions,
             max_subjects: WHITTLE_MAX_SUBJECTS,
             expander_degree: config.expander_degree,
             expander_seed: config.expander_seed,

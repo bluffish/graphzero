@@ -1,7 +1,7 @@
 use gz_engine::{CandidateOptions, EngineResult, GraphEngine, ModelVersion};
 use gz_engine_whittle::{
-    WhittleEngine, WhittleEngineConfig, WhittleFeatureExtractor, WhittleGraphGenerator,
-    WhittleGraphGeneratorConfig, WhittleGraphId, WhittleRoot,
+    WhittleEngine, WhittleEngineConfig, WhittleFeatureExtractor, WhittleFeatureExtractorConfig,
+    WhittleGraphGenerator, WhittleGraphGeneratorConfig, WhittleGraphId, WhittleRoot,
 };
 use gz_eval::{RandomValueEvaluator, RandomValueEvaluatorConfig};
 use gz_eval_service::{
@@ -39,6 +39,7 @@ pub struct SelfplayConfig {
     pub max_steps: usize,
     pub simulations: usize,
     pub tree_reuse: bool,
+    pub max_candidates: usize,
     pub max_batch: usize,
     pub evaluator: EvaluatorMode,
     pub python_dir: Option<PathBuf>,
@@ -63,6 +64,7 @@ impl Default for SelfplayConfig {
             max_steps: 8,
             simulations: 8,
             tree_reuse: true,
+            max_candidates: WHITTLE_FEATURE_MAX_ENGINE_CANDIDATES,
             max_batch: 16,
             evaluator: EvaluatorMode::Random,
             python_dir: None,
@@ -95,6 +97,9 @@ impl SelfplayConfig {
         }
         if self.max_batch == 0 {
             return Err("--max-batch must be greater than zero".to_owned());
+        }
+        if self.max_candidates == 0 {
+            return Err("--max-candidates must be greater than zero".to_owned());
         }
         if !self.reference_ema_decay.is_finite()
             || self.reference_ema_decay <= 0.0
@@ -270,7 +275,7 @@ pub fn run(config: SelfplayConfig) -> Result<SelfplaySummary, String> {
     if let Some(socket) = config.serve_socket.clone() {
         // The featurized run registers the schema itself, but the sample
         // service binds before the run starts and needs it already stored.
-        let extractor = WhittleFeatureExtractor::new(&engines[0]);
+        let extractor = feature_extractor(&engines[0], &config);
         store
             .ensure_feature_schema(extractor.schema().config())
             .map_err(|error| error.to_string())?;
@@ -343,7 +348,7 @@ fn run_stub(
 ) -> Result<SelfplaySummary, String> {
     let extractors = engines
         .iter()
-        .map(WhittleFeatureExtractor::new)
+        .map(|engine| feature_extractor(engine, &config))
         .collect::<Vec<_>>();
     let orchestrator = ThreadedGumbelOrchestrator::new(
         engines,
@@ -380,7 +385,7 @@ fn run_process(
 ) -> Result<SelfplaySummary, String> {
     let extractors = engines
         .iter()
-        .map(WhittleFeatureExtractor::new)
+        .map(|engine| feature_extractor(engine, &config))
         .collect::<Vec<_>>();
     let mut process = EvaluatorProcess::spawn(EvaluatorProcessConfig {
         working_dir: config
@@ -518,18 +523,29 @@ fn search(engine: &WhittleEngine, config: &SelfplayConfig) -> Result<GumbelMcts,
         candidate_options: match config.evaluator {
             EvaluatorMode::Random => CandidateOptions::default(),
             EvaluatorMode::Stub | EvaluatorMode::ProcessStub | EvaluatorMode::Torch => {
-                feature_candidate_options()
+                feature_candidate_options(config)
             }
         },
         measure_options: engine.measure_options(),
     }))
 }
 
-fn feature_candidate_options() -> CandidateOptions {
+fn feature_candidate_options(config: &SelfplayConfig) -> CandidateOptions {
     CandidateOptions {
-        max_candidates: Some(WHITTLE_FEATURE_MAX_ENGINE_CANDIDATES),
+        max_candidates: Some(config.max_candidates),
         deterministic_order: true,
     }
+}
+
+/// Feature rows hold one action per engine candidate plus STOP.
+fn feature_extractor(engine: &WhittleEngine, config: &SelfplayConfig) -> WhittleFeatureExtractor {
+    WhittleFeatureExtractor::with_config(
+        engine,
+        WhittleFeatureExtractorConfig {
+            max_actions: config.max_candidates as u32 + 1,
+            ..WhittleFeatureExtractorConfig::default()
+        },
+    )
 }
 
 fn provider(
