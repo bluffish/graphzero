@@ -476,6 +476,45 @@ impl GraphEngine for WhittleEngine {
         })
     }
 
+    fn release(
+        &mut self,
+        graphs: &[Self::Graph],
+        candidates: &[Self::Candidate],
+    ) -> EngineResult<()> {
+        if graphs.contains(&self.root) {
+            return Err(internal_error(4, "cannot release Whittle root graph"));
+        }
+
+        let mut released_graphs = HashSet::with_capacity(graphs.len());
+        for graph in graphs.iter().copied() {
+            if !released_graphs.insert(graph) {
+                continue;
+            }
+            let graph_hash = self.graphs.release(graph)?;
+            self.caches
+                .candidates
+                .remove(&(graph_hash, self.action_set_hash));
+            self.caches
+                .transitions
+                .retain(|(before, _, _), after| *before != graph_hash && *after != graph);
+        }
+
+        let mut released_candidates = HashSet::with_capacity(candidates.len());
+        for candidate in candidates.iter().copied() {
+            if released_candidates.insert(candidate) {
+                let candidate_body = self.candidates.release(candidate)?;
+                self.caches
+                    .candidates
+                    .retain(|_, cached| !cached.contains(&candidate));
+                self.caches.transitions.retain(|key, _| {
+                    key.0 != candidate_body.graph_hash || key.2 != candidate_body.candidate_hash
+                });
+            }
+        }
+
+        Ok(())
+    }
+
     fn export_graph(&self, graph: Self::Graph) -> EngineResult<GraphArtifact> {
         let graph = self.graph(graph)?;
 
@@ -490,7 +529,8 @@ impl GraphEngine for WhittleEngine {
 impl BatchGraphEngine for WhittleEngine {}
 
 struct GraphArena {
-    items: Vec<WhittleGraph>,
+    items: Vec<GraphSlot>,
+    free: Vec<u32>,
     by_hash: HashMap<GraphHash, WhittleGraphId>,
     engine_id: EngineId,
     engine_version: EngineVersion,
@@ -500,6 +540,7 @@ impl GraphArena {
     fn new(engine_id: EngineId, engine_version: EngineVersion) -> Self {
         Self {
             items: Vec::new(),
+            free: Vec::new(),
             by_hash: HashMap::new(),
             engine_id,
             engine_version,
@@ -515,8 +556,7 @@ impl GraphArena {
             return Ok(id);
         }
 
-        let id = WhittleGraphId::from_raw(self.items.len() as u32);
-        self.items.push(WhittleGraph {
+        let graph = WhittleGraph {
             arity: compact.arity,
             capacity: compact.capacity,
             output_node: compact.output_node,
@@ -525,14 +565,83 @@ impl GraphArena {
             arg1: compact.arg1.into_boxed_slice(),
             canonical: canonical.into_boxed_slice(),
             hash,
-        });
+        };
+        let id = if let Some(index) = self.free.pop() {
+            let slot = &mut self.items[index as usize];
+            debug_assert!(slot.graph.is_none());
+            slot.graph = Some(graph);
+            WhittleGraphId::from_slot(index, slot.generation())
+        } else {
+            let index = self.items.len() as u32;
+            self.items.push(GraphSlot::new(graph));
+            WhittleGraphId::from_slot(index, 0)
+        };
         self.by_hash.insert(hash, id);
         Ok(id)
     }
 
     fn get(&self, id: WhittleGraphId) -> Option<&WhittleGraph> {
-        self.items.get(id.raw() as usize)
+        self.items.get(id.raw() as usize).and_then(|slot| {
+            slot.assert_generation(id.generation(), "stale WhittleGraphId");
+            slot.graph.as_ref()
+        })
     }
+
+    fn release(&mut self, id: WhittleGraphId) -> EngineResult<GraphHash> {
+        let Some(slot) = self.items.get_mut(id.raw() as usize) else {
+            return Err(EngineError::UnknownGraph { graph_hash: None });
+        };
+        slot.assert_generation(id.generation(), "stale WhittleGraphId");
+        let Some(graph) = slot.graph.take() else {
+            return Err(EngineError::UnknownGraph { graph_hash: None });
+        };
+        slot.bump_generation();
+        self.free.push(id.raw());
+        self.by_hash.remove(&graph.hash);
+        Ok(graph.hash)
+    }
+}
+
+struct GraphSlot {
+    graph: Option<WhittleGraph>,
+    #[cfg(debug_assertions)]
+    generation: u32,
+}
+
+impl GraphSlot {
+    fn new(graph: WhittleGraph) -> Self {
+        Self {
+            graph: Some(graph),
+            #[cfg(debug_assertions)]
+            generation: 0,
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    const fn generation(&self) -> u32 {
+        self.generation
+    }
+
+    #[cfg(not(debug_assertions))]
+    const fn generation(&self) -> u32 {
+        0
+    }
+
+    #[cfg(debug_assertions)]
+    fn assert_generation(&self, expected: u32, message: &'static str) {
+        assert_eq!(self.generation, expected, "{message}");
+    }
+
+    #[cfg(not(debug_assertions))]
+    fn assert_generation(&self, _expected: u32, _message: &'static str) {}
+
+    #[cfg(debug_assertions)]
+    fn bump_generation(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+    }
+
+    #[cfg(not(debug_assertions))]
+    fn bump_generation(&mut self) {}
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -573,19 +682,88 @@ impl WhittleCandidate {
 
 #[derive(Default)]
 struct CandidateArena {
-    items: Vec<WhittleCandidate>,
+    items: Vec<CandidateSlot>,
+    free: Vec<u32>,
 }
 
 impl CandidateArena {
     fn insert(&mut self, candidate: WhittleCandidate) -> WhittleCandidateId {
-        let id = WhittleCandidateId::from_raw(self.items.len() as u32);
-        self.items.push(candidate);
-        id
+        if let Some(index) = self.free.pop() {
+            let slot = &mut self.items[index as usize];
+            debug_assert!(slot.candidate.is_none());
+            slot.candidate = Some(candidate);
+            WhittleCandidateId::from_slot(index, slot.generation())
+        } else {
+            let index = self.items.len() as u32;
+            self.items.push(CandidateSlot::new(candidate));
+            WhittleCandidateId::from_slot(index, 0)
+        }
     }
 
     fn get(&self, id: WhittleCandidateId) -> Option<&WhittleCandidate> {
-        self.items.get(id.raw() as usize)
+        self.items.get(id.raw() as usize).and_then(|slot| {
+            slot.assert_generation(id.generation(), "stale WhittleCandidateId");
+            slot.candidate.as_ref()
+        })
     }
+
+    fn release(&mut self, id: WhittleCandidateId) -> EngineResult<WhittleCandidate> {
+        let Some(slot) = self.items.get_mut(id.raw() as usize) else {
+            return Err(EngineError::UnknownCandidate {
+                candidate_hash: None,
+            });
+        };
+        slot.assert_generation(id.generation(), "stale WhittleCandidateId");
+        let candidate = slot.candidate.take().ok_or(EngineError::UnknownCandidate {
+            candidate_hash: None,
+        })?;
+        slot.bump_generation();
+        self.free.push(id.raw());
+        Ok(candidate)
+    }
+}
+
+#[derive(Default)]
+struct CandidateSlot {
+    candidate: Option<WhittleCandidate>,
+    #[cfg(debug_assertions)]
+    generation: u32,
+}
+
+impl CandidateSlot {
+    fn new(candidate: WhittleCandidate) -> Self {
+        Self {
+            candidate: Some(candidate),
+            #[cfg(debug_assertions)]
+            generation: 0,
+        }
+    }
+
+    #[cfg(debug_assertions)]
+    const fn generation(&self) -> u32 {
+        self.generation
+    }
+
+    #[cfg(not(debug_assertions))]
+    const fn generation(&self) -> u32 {
+        0
+    }
+
+    #[cfg(debug_assertions)]
+    fn assert_generation(&self, expected: u32, message: &'static str) {
+        assert_eq!(self.generation, expected, "{message}");
+    }
+
+    #[cfg(not(debug_assertions))]
+    fn assert_generation(&self, _expected: u32, _message: &'static str) {}
+
+    #[cfg(debug_assertions)]
+    fn bump_generation(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+    }
+
+    #[cfg(not(debug_assertions))]
+    fn bump_generation(&mut self) {}
 }
 
 #[derive(Default)]

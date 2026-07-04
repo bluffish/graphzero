@@ -32,33 +32,133 @@ impl OpCode {
     }
 }
 
+#[cfg(debug_assertions)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct WhittleGraphId {
+    index: u32,
+    generation: u32,
+}
+
+#[cfg(not(debug_assertions))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct WhittleGraphId(u32);
 
 impl WhittleGraphId {
     #[must_use]
     pub const fn from_raw(value: u32) -> Self {
-        Self(value)
+        #[cfg(debug_assertions)]
+        {
+            Self {
+                index: value,
+                generation: 0,
+            }
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            Self(value)
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn from_slot(index: u32, generation: u32) -> Self {
+        #[cfg(debug_assertions)]
+        {
+            Self { index, generation }
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            let _ = generation;
+            Self(index)
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn generation(self) -> u32 {
+        #[cfg(debug_assertions)]
+        {
+            self.generation
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            0
+        }
     }
 
     #[must_use]
     pub const fn raw(self) -> u32 {
-        self.0
+        #[cfg(debug_assertions)]
+        {
+            self.index
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            self.0
+        }
     }
 }
 
+#[cfg(debug_assertions)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
+pub struct WhittleCandidateId {
+    index: u32,
+    generation: u32,
+}
+
+#[cfg(not(debug_assertions))]
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct WhittleCandidateId(u32);
 
 impl WhittleCandidateId {
     #[must_use]
     pub const fn from_raw(value: u32) -> Self {
-        Self(value)
+        #[cfg(debug_assertions)]
+        {
+            Self {
+                index: value,
+                generation: 0,
+            }
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            Self(value)
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn from_slot(index: u32, generation: u32) -> Self {
+        #[cfg(debug_assertions)]
+        {
+            Self { index, generation }
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            let _ = generation;
+            Self(index)
+        }
+    }
+
+    #[must_use]
+    pub(crate) const fn generation(self) -> u32 {
+        #[cfg(debug_assertions)]
+        {
+            self.generation
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            0
+        }
     }
 
     #[must_use]
     pub const fn raw(self) -> u32 {
-        self.0
+        #[cfg(debug_assertions)]
+        {
+            self.index
+        }
+        #[cfg(not(debug_assertions))]
+        {
+            self.0
+        }
     }
 }
 
