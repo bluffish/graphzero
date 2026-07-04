@@ -137,10 +137,20 @@ def run(config_path: str | Path) -> None:
             startup_timeout=config.trainer.startup_timeout,
             reconnect_limit=config.trainer.reconnect_limit,
         )
-        sampler.wait_until_ready(
+        ready_ack = sampler.wait_until_ready(
             config.trainer.min_startup_rows,
             alive_check=lambda: check_child(selfplay, "selfplay"),
         )
+        if ready_ack.root is not None:
+            metrics.write(
+                {
+                    "event": "graph",
+                    "root_cost": ready_ack.root.cost,
+                    "root_nodes": ready_ack.root.node_count,
+                    "root_edges": ready_ack.root.edge_count,
+                    "root_candidates": ready_ack.root.candidate_count,
+                }
+            )
         stager = TrainingStager(sampler.feature_schema, config.trainer.batch, config.trainer.device)
         loop = TrainerLoop(
             model,
@@ -191,7 +201,11 @@ def run(config_path: str | Path) -> None:
                     "episode_cost_ema": ack.episode_cost_ema,
                     "episode_len_ema": ack.episode_len_ema,
                     "stop_rate_ema": ack.stop_rate_ema,
+                    "best_cost": ack.best_cost,
                 }
+                if ack.root is not None and ack.episodes:
+                    record["reduction_ema"] = ack.root.cost - ack.episode_cost_ema
+                    record["reduction_best"] = ack.root.cost - ack.best_cost
                 record.update(window.drain(produced, ack.episodes))
                 metrics.write(record)
             if (step + 1) % config.trainer.publish_interval == 0:
@@ -317,6 +331,9 @@ WANDB_KEYS = {
     "episode_cost_ema": "selfplay/episode_cost_ema",
     "episode_len_ema": "selfplay/episode_len_ema",
     "stop_rate_ema": "selfplay/stop_rate_ema",
+    "best_cost": "selfplay/best_cost",
+    "reduction_ema": "graph/reduction_ema",
+    "reduction_best": "graph/reduction_best",
     "steps_per_s": "perf/steps_per_s",
     "rows_per_s": "perf/rows_per_s",
     "episodes_per_s": "perf/episodes_per_s",
@@ -363,6 +380,10 @@ class WandbRun:
         if record.get("event") == "step":
             payload = {WANDB_KEYS[k]: v for k, v in record.items() if k in WANDB_KEYS}
             self.run.log(payload, step=record["step"])
+        elif record.get("event") == "graph":
+            facts = {k: v for k, v in record.items() if k != "event"}
+            self.run.config.update({"graph": facts}, allow_val_change=True)
+            self.run.log({f"graph/{k}": v for k, v in facts.items()}, step=0)
         elif record.get("event") == "publish":
             self.publishes += 1
             payload = {

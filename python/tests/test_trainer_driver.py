@@ -151,3 +151,33 @@ def test_memory_watchdog_aborts_below_floor(monkeypatch: pytest.MonkeyPatch) -> 
     with pytest.raises(RuntimeError, match="12.0 GiB available"):
         driver.check_memory(40.0)
     driver.check_memory(0)  # disabled
+
+
+def test_wandb_run_logs_graph_facts_once() -> None:
+    class FakeConfig(dict):
+        def update(self, values, allow_val_change=False):
+            dict.update(self, values)
+
+    class FakeRun:
+        def __init__(self) -> None:
+            self.logged: list[tuple[dict, int]] = []
+            self.config = FakeConfig()
+
+        def log(self, payload: dict, step: int) -> None:
+            self.logged.append((payload, step))
+
+    run = WandbRun(FakeRun())
+    run.write(
+        {
+            "event": "graph",
+            "root_cost": 150.0,
+            "root_nodes": 200,
+            "root_edges": 400,
+            "root_candidates": 900,
+        }
+    )
+
+    payload, step = run.run.logged[0]
+    assert step == 0
+    assert payload["graph/root_cost"] == 150.0
+    assert run.run.config["graph"]["root_candidates"] == 900

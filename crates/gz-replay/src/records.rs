@@ -230,3 +230,14 @@ fn sign_target(learner: f32, reference: f32) -> f32 {
         0.0
     }
 }
+
+/// Static facts about the fixed root graph of a single-graph run,
+/// probed once at selfplay startup. Telemetry: consumed by the trainer
+/// through the sample-service handshake.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
+pub struct ReplayRootInfo {
+    pub cost: f32,
+    pub node_count: u32,
+    pub edge_count: u32,
+    pub candidate_count: u32,
+}

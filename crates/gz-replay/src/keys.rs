@@ -13,6 +13,7 @@ pub(crate) const META_CONSUMED_ROWS: &[u8] = b"consumed_rows";
 pub(crate) const META_RETAINED_FLOOR: &[u8] = b"retained_floor";
 pub(crate) const META_DELETED_FLOOR: &[u8] = b"deleted_floor";
 pub(crate) const META_FEATURE_SCHEMA: &[u8] = b"feature_schema";
+pub(crate) const META_ROOT_INFO: &[u8] = b"root_info";
 
 pub(crate) const EPISODE_KEY_LEN: usize = 8;
 pub(crate) const ROW_KEY_LEN: usize = 12;

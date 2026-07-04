@@ -102,13 +102,17 @@ def serve_samples(
 
 def ack_payload(produced_rows: int) -> bytes:
     return (
-        struct.pack("<I", 3)
+        struct.pack("<I", 4)
         + SCHEMA_HASH
         + struct.pack("<I", 2)
         + struct.pack("<Q", produced_rows)
         + struct.pack("<Q", 6)
         + struct.pack("<Q", 2)
         + struct.pack("<fff", 87.5, 12.0, 0.25)
+        + struct.pack("<f", 61.0)
+        + struct.pack("<I", 1)
+        + struct.pack("<f", 150.0)
+        + struct.pack("<III", 200, 400, 900)
         + schema_config().encode()
     )
 

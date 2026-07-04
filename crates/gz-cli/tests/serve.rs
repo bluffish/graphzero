@@ -107,7 +107,11 @@ fn replay_serve_returns_feature_batch_and_targets() {
     // A reopened store has unseeded (zero) EMAs; the live in-process serve
     // is where they carry values (covered by the store unit test).
     assert!(cost_ema.is_finite() && len_ema >= 0.0 && (0.0..=1.0).contains(&stop_ema));
-    let schema_config = decode_feature_schema_config(&ack[76..]).unwrap();
+    let best_cost = f32::from_le_bytes(ack[76..80].try_into().unwrap());
+    assert!(best_cost.is_finite());
+    let root_present = u32::from_le_bytes(ack[80..84].try_into().unwrap());
+    assert!(root_present <= 1);
+    let schema_config = decode_feature_schema_config(&ack[100..]).unwrap();
     assert_eq!(Some(schema_config), expected_schema_config);
 
     let mut sample = Vec::new();

@@ -17,7 +17,7 @@ from gz.proto import (
     write_frame,
 )
 
-SAMPLE_PROTOCOL_VERSION = 3
+SAMPLE_PROTOCOL_VERSION = 4
 
 FRAME_HELLO = 1
 FRAME_HELLO_ACK = 2
@@ -47,7 +47,17 @@ class SampleAck:
     episode_cost_ema: float
     episode_len_ema: float
     stop_rate_ema: float
+    best_cost: float
+    root: RootInfo | None
     feature_schema: FeatureSchemaConfig
+
+
+@dataclass(frozen=True, slots=True)
+class RootInfo:
+    cost: float
+    node_count: int
+    edge_count: int
+    candidate_count: int
 
 
 class SampleClient:
@@ -188,7 +198,7 @@ class SampleClient:
 
 
 def decode_ack(payload: memoryview) -> SampleAck:
-    if len(payload) < 76:
+    if len(payload) < 100:
         raise SampleError("sample HELLO_ACK truncated")
     protocol_version = struct.unpack_from("<I", payload, 0)[0]
     if protocol_version != SAMPLE_PROTOCOL_VERSION:
@@ -198,6 +208,20 @@ def decode_ack(payload: memoryview) -> SampleAck:
     episodes = struct.unpack_from("<Q", payload, 48)[0]
     episodes_stopped = struct.unpack_from("<Q", payload, 56)[0]
     cost_ema, len_ema, stop_ema = struct.unpack_from("<fff", payload, 64)
+    best_cost = struct.unpack_from("<f", payload, 76)[0]
+    root_present = struct.unpack_from("<I", payload, 80)[0]
+    root_cost = struct.unpack_from("<f", payload, 84)[0]
+    root_nodes, root_edges, root_candidates = struct.unpack_from("<III", payload, 88)
+    root = (
+        RootInfo(
+            cost=root_cost,
+            node_count=root_nodes,
+            edge_count=root_edges,
+            candidate_count=root_candidates,
+        )
+        if root_present
+        else None
+    )
     return SampleAck(
         feature_schema_hash=FeatureSchemaHash.from_bytes(payload[4:36]),
         max_batch=max_batch,
@@ -207,7 +231,9 @@ def decode_ack(payload: memoryview) -> SampleAck:
         episode_cost_ema=cost_ema,
         episode_len_ema=len_ema,
         stop_rate_ema=stop_ema,
-        feature_schema=FeatureSchemaConfig.decode(payload[76:]),
+        best_cost=best_cost,
+        root=root,
+        feature_schema=FeatureSchemaConfig.decode(payload[100:]),
     )
 
 

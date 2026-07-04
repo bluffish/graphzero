@@ -7,6 +7,7 @@ use gz_eval::{RandomValueEvaluator, RandomValueEvaluatorConfig};
 use gz_eval_service::{
     EvaluatorProcess, EvaluatorProcessConfig, Hello, STUB_MODEL_VERSION, StubBackend,
 };
+use gz_features::{FeatureExtractor, PositionFeatures};
 use gz_orchestrator::reference::{
     BeamReferenceProvider, GreedyReferenceProvider, RandomReferenceProvider, Reference,
     ReferenceProvider, RootBaselineProvider, SelfAverageProvider,
@@ -15,7 +16,7 @@ use gz_orchestrator::{
     FeaturizedRuntime, ReplayBackpressure, ReplayRuntime, RootSource, ThreadedGumbelOrchestrator,
     ThreadedOrchestratorConfig,
 };
-use gz_replay::{ReplayCounters, ReplayEpisodeId, ReplayStore};
+use gz_replay::{ReplayCounters, ReplayEpisodeId, ReplayRootInfo, ReplayStore};
 use gz_search::{
     BeamSearch, BeamSearchConfig, GreedySearch, GreedySearchConfig, GumbelEpisodeContext,
     GumbelMcts, GumbelMctsConfig, RandomSearch, RandomSearchConfig,
@@ -308,6 +309,10 @@ pub fn run(config: SelfplayConfig) -> Result<SelfplaySummary, String> {
         .enumerate()
         .map(|(lane, engine)| provider(engine, &config, lane))
         .collect::<Result<Vec<_>, _>>()?;
+
+    if config.root_mode == RootMode::Fixed {
+        probe_fixed_root(&store, &config)?;
+    }
 
     if let Some(socket) = config.serve_socket.clone() {
         // The featurized run registers the schema itself, but the sample
@@ -627,6 +632,53 @@ fn provider(
     };
 
     Ok(provider)
+}
+
+/// Measures and describes the shared root once so the trainer can anchor
+/// graph-level metrics (reduction = root cost - terminal cost). Uses a
+/// throwaway engine seeded exactly like every lane's fixed source.
+fn probe_fixed_root(store: &ReplayStore, config: &SelfplayConfig) -> Result<(), String> {
+    let mut engine = WhittleEngine::new(whittle_engine_config()).map_err(|e| e.to_string())?;
+    let mut generator = WhittleGraphGenerator::from_seed(whittle_generator_config(), config.seed);
+    let root = generator
+        .sample_into(&mut engine)
+        .map_err(|e| e.to_string())?
+        .graph;
+    let mut candidates = Vec::new();
+    engine
+        .candidates(root, feature_candidate_options(config), &mut candidates)
+        .map_err(|e| e.to_string())?;
+    let mut extractor = feature_extractor(&engine, config);
+    let row = extractor
+        .extract(
+            &engine,
+            root,
+            &candidates,
+            PositionFeatures {
+                root_step: 0,
+                leaf_depth: 0,
+                budget_fraction: 1.0,
+                budget_step: 0.0,
+            },
+        )
+        .map_err(|e| format!("root feature probe failed: {e:?}"))?;
+    let measure = engine
+        .measure(root, engine.measure_options())
+        .map_err(|e| e.to_string())?;
+    let cost = -measure
+        .scalar_reward
+        .ok_or_else(|| "fixed root has no scalar reward".to_owned())?;
+    // Expander edges are model wiring, not graph structure.
+    let edge_count = row.edges.iter().filter(|edge| edge.edge_type < 2).count() as u32;
+
+    store
+        .set_root_info(&ReplayRootInfo {
+            cost,
+            node_count: row.node_count,
+            edge_count,
+            candidate_count: candidates.len() as u32,
+        })
+        .map_err(|e| e.to_string())
 }
 
 fn root_sources(config: &SelfplayConfig) -> Vec<CliRoots> {

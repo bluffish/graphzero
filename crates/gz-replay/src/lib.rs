@@ -11,7 +11,7 @@ mod store;
 pub use error::{ReplayError, ReplayResult};
 pub use records::{
     ReplayEpisodeId, ReplayEpisodeRecord, ReplayOutcome, ReplayReference, ReplayReferenceKind,
-    ReplayRow,
+    ReplayRootInfo, ReplayRow,
 };
 pub use sample::SampleConfig;
 pub use store::{ReplayCounters, ReplayStore};

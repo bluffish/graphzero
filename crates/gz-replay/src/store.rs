@@ -2,11 +2,13 @@ use crate::error::{ReplayError, ReplayResult};
 use crate::keys::{
     CF_EPISODES, CF_META, CF_ROW_INDEX, CF_ROWS, META_CONSUMED_ROWS, META_DELETED_FLOOR,
     META_EPISODES_STOPPED, META_FEATURE_SCHEMA, META_NEXT_EPISODE_SEQ, META_PRODUCED_ROWS,
-    META_RETAINED_FLOOR, META_SCHEMA_VERSION, SCHEMA_VERSION, decode_episode_from_row_key,
-    decode_step_from_row_key, decode_u32, decode_u64, decode_u64_key, encode_u32, encode_u64,
-    episode_key, row_index_key, row_key,
+    META_RETAINED_FLOOR, META_ROOT_INFO, META_SCHEMA_VERSION, SCHEMA_VERSION,
+    decode_episode_from_row_key, decode_step_from_row_key, decode_u32, decode_u64, decode_u64_key,
+    encode_u32, encode_u64, episode_key, row_index_key, row_key,
 };
-use crate::records::{ReplayEpisodeId, ReplayEpisodeRecord, ReplayRow, validate_episode};
+use crate::records::{
+    ReplayEpisodeId, ReplayEpisodeRecord, ReplayRootInfo, ReplayRow, validate_episode,
+};
 use crate::sample::{ReplayRng, SampleConfig};
 use gz_features::{FeatureSchema, FeatureSchemaConfig};
 use rocksdb::{
@@ -32,6 +34,7 @@ pub struct ReplayStore {
     cost_ema_bits: AtomicU64,
     len_ema_bits: AtomicU64,
     stop_ema_bits: AtomicU64,
+    best_cost_bits: AtomicU64,
 }
 
 const OUTCOME_EMA_DECAY: f64 = 0.99;
@@ -74,6 +77,7 @@ impl ReplayStore {
             cost_ema_bits: AtomicU64::new(0),
             len_ema_bits: AtomicU64::new(0),
             stop_ema_bits: AtomicU64::new(0),
+            best_cost_bits: AtomicU64::new(0),
         })
     }
 
@@ -135,11 +139,16 @@ impl ReplayStore {
             .store(next_episode_seq, Ordering::Release);
         self.produced_rows.store(produced_rows, Ordering::Release);
         self.enforce_retention(produced_rows)?;
+        let cost = f64::from(-record.outcome.learner_reward);
         self.update_outcome_emas(
-            f64::from(-record.outcome.learner_reward),
+            cost,
             rows.len() as f64,
             f64::from(u8::from(record.outcome.stopped)),
         );
+        let best = self.best_cost_bits.load(Ordering::Acquire);
+        if best == 0 || cost < f64::from_bits(best) {
+            self.best_cost_bits.store(cost.to_bits(), Ordering::Release);
+        }
 
         Ok(id)
     }
@@ -330,6 +339,29 @@ impl ReplayStore {
             f64::from_bits(self.len_ema_bits.load(Ordering::Acquire)),
             f64::from_bits(self.stop_ema_bits.load(Ordering::Acquire)),
         ))
+    }
+
+    /// Lowest terminal cost of any appended episode. None until seeded.
+    #[must_use]
+    pub fn best_cost(&self) -> Option<f64> {
+        let bits = self.best_cost_bits.load(Ordering::Acquire);
+        (bits != 0).then(|| f64::from_bits(bits))
+    }
+
+    /// Static root facts for single-graph runs; survives reopen.
+    pub fn set_root_info(&self, info: &ReplayRootInfo) -> ReplayResult<()> {
+        let meta = self.cf(CF_META)?;
+        self.db
+            .put_cf(&meta, META_ROOT_INFO, postcard::to_allocvec(info)?)
+            .map_err(ReplayError::from)
+    }
+
+    pub fn root_info(&self) -> ReplayResult<Option<ReplayRootInfo>> {
+        let meta = self.cf(CF_META)?;
+        self.db
+            .get_cf(&meta, META_ROOT_INFO)?
+            .map(|bytes| postcard::from_bytes(&bytes).map_err(ReplayError::from))
+            .transpose()
     }
 
     /// (episodes appended, episodes that ended by selecting STOP).

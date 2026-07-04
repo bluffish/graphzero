@@ -9,7 +9,7 @@ use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::PathBuf;
 use std::time::Duration;
 
-pub const SAMPLE_PROTOCOL_VERSION: u32 = 3;
+pub const SAMPLE_PROTOCOL_VERSION: u32 = 4;
 
 const MAX_FRAME: usize = 256 * 1024 * 1024;
 const FRAME_HELLO: u8 = 1;
@@ -213,7 +213,12 @@ impl ReplaySampleServer {
         let (episodes, episodes_stopped) = self.store.episode_counters();
         // Unseeded EMAs surface as zeros; consumers gate on the episode count.
         let (cost_ema, len_ema, stop_ema) = self.store.outcome_emas().unwrap_or((0.0, 0.0, 0.0));
-        let mut payload = Vec::with_capacity(76 + schema_config.len());
+        let best_cost = self.store.best_cost().unwrap_or(0.0);
+        let root_info = self
+            .store
+            .root_info()
+            .map_err(|_| (ERROR_ENCODING, "corrupt root info"))?;
+        let mut payload = Vec::with_capacity(100 + schema_config.len());
         payload.extend_from_slice(&SAMPLE_PROTOCOL_VERSION.to_le_bytes());
         payload.extend_from_slice(self.collator.schema().hash().as_bytes());
         payload.extend_from_slice(&(self.max_batch.get() as u32).to_le_bytes());
@@ -223,6 +228,18 @@ impl ReplaySampleServer {
         payload.extend_from_slice(&(cost_ema as f32).to_le_bytes());
         payload.extend_from_slice(&(len_ema as f32).to_le_bytes());
         payload.extend_from_slice(&(stop_ema as f32).to_le_bytes());
+        payload.extend_from_slice(&(best_cost as f32).to_le_bytes());
+        payload.extend_from_slice(&u32::from(root_info.is_some()).to_le_bytes());
+        let root = root_info.unwrap_or(gz_replay::ReplayRootInfo {
+            cost: 0.0,
+            node_count: 0,
+            edge_count: 0,
+            candidate_count: 0,
+        });
+        payload.extend_from_slice(&root.cost.to_le_bytes());
+        payload.extend_from_slice(&root.node_count.to_le_bytes());
+        payload.extend_from_slice(&root.edge_count.to_le_bytes());
+        payload.extend_from_slice(&root.candidate_count.to_le_bytes());
         payload.extend_from_slice(&schema_config);
         write_frame(stream, write_buf, FRAME_HELLO_ACK, &[&payload])
             .map_err(|_| (ERROR_PROTOCOL, "failed to write HELLO_ACK"))
