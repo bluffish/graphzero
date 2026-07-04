@@ -129,6 +129,31 @@ fn root_request_appends_stop_and_selected_candidate_is_reused() {
 }
 
 #[test]
+fn episode_records_created_engine_handles() {
+    let mut engine = TestEngine::new()
+        .candidates(0, [1, 2])
+        .candidates(20, [])
+        .apply(0, 2, 20)
+        .reward(20, 20.0);
+    let mut evaluator = RecordedEvaluator::default()
+        .row(0, [0.0, 4.0, -10.0], 0.0)
+        .row(20, [0.0], 1.0);
+    let search = GumbelMcts::new(config(1));
+
+    let episode = search
+        .run(
+            &mut engine,
+            &mut evaluator,
+            0,
+            GumbelEpisodeContext::default(),
+        )
+        .unwrap();
+
+    assert_eq!(episode.created_graphs, vec![20]);
+    assert_eq!(episode.created_candidates, vec![1, 2]);
+}
+
+#[test]
 fn stop_is_selected_through_eval_policy_and_never_applied() {
     let mut engine = TestEngine::new().candidates(0, [1]).reward(0, 0.0);
     let mut evaluator = RecordedEvaluator::default().row(0, [-10.0, 10.0], 0.0);

@@ -299,6 +299,8 @@ pub struct GumbelEpisode<G, C> {
     pub final_context: ReplayGraphContext,
     pub steps: Vec<GumbelStep<G, C>>,
     pub root_stats: Vec<GumbelRootStats>,
+    pub created_graphs: Vec<G>,
+    pub created_candidates: Vec<C>,
     pub final_measure: MeasureResult<G>,
     pub stop_reason: GumbelStopReason,
     pub search_config_hash: SearchConfigHash,
@@ -341,6 +343,8 @@ pub struct GumbelEpisodeTask<G, C> {
     root_context: Option<ReplayGraphContext>,
     steps: Vec<GumbelStep<G, C>>,
     root_stats: Vec<GumbelRootStats>,
+    created_graphs: Vec<G>,
+    created_candidates: Vec<C>,
     step_index: usize,
     budget_step: f32,
     next_token: u64,
@@ -376,6 +380,8 @@ where
             root_context: None,
             steps: Vec::new(),
             root_stats: Vec::new(),
+            created_graphs: Vec::new(),
+            created_candidates: Vec::new(),
             step_index: 0,
             budget_step,
             next_token: 0,
@@ -468,6 +474,7 @@ where
                 | SearchWorkResult::Apply(_)
                 | SearchWorkResult::Eval(_)),
             ) => {
+                self.track_created_handles(&result);
                 root_task.resume(inner, result)?;
                 self.state = EpisodeTaskState::Root(root_task);
                 Ok(())
@@ -491,6 +498,8 @@ where
                     final_context,
                     steps: std::mem::take(&mut self.steps),
                     root_stats: std::mem::take(&mut self.root_stats),
+                    created_graphs: std::mem::take(&mut self.created_graphs),
+                    created_candidates: std::mem::take(&mut self.created_candidates),
                     final_measure: measure,
                     stop_reason,
                     search_config_hash: self.search_config_hash,
@@ -508,6 +517,21 @@ where
         let token = WorkToken::new(self.next_token);
         self.next_token += 1;
         token
+    }
+
+    fn track_created_handles(&mut self, result: &SearchWorkResult<G, C>) {
+        match result {
+            SearchWorkResult::Expand(expanded) => {
+                self.created_candidates.extend(
+                    expanded
+                        .candidates
+                        .iter()
+                        .map(|candidate| candidate.candidate),
+                );
+            }
+            SearchWorkResult::Apply(applied) => self.created_graphs.push(applied.after),
+            SearchWorkResult::Measure(_) | SearchWorkResult::Eval(_) => {}
+        }
     }
 
     fn new_root_task(&self) -> GumbelRootTask<G, C> {
