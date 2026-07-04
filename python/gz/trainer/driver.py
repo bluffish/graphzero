@@ -36,6 +36,7 @@ class TrainerConfig:
     log_interval: int = 1
     step_sleep: float = 0.0
     bootstrap_episodes: int = 64
+    min_available_gb: float = 40.0
 
 
 @dataclass(frozen=True, slots=True)
@@ -154,6 +155,8 @@ def run(config_path: str | Path) -> None:
         window = PerfWindow()
         for step in range(config.trainer.total_steps):
             check_child(selfplay, "selfplay")
+            if step % 50 == 0:
+                check_memory(config.trainer.min_available_gb)
             sample_started = time.perf_counter()
             result = sampler.sample(
                 config.trainer.batch,
@@ -534,6 +537,29 @@ def spawn_torch_selfplay(config: RunConfig) -> subprocess.Popen[bytes]:
         # its GPU memory) when selfplay is SIGKILLed.
         start_new_session=True,
     )
+
+
+def check_memory(min_available_gb: float) -> None:
+    """Aborts the run before memory pressure can freeze a swapless box:
+    the kernel thrashes long before the OOM killer fires."""
+    if min_available_gb <= 0:
+        return
+    available = _mem_available_gb()
+    if available is not None and available < min_available_gb:
+        raise RuntimeError(
+            f"aborting: {available:.1f} GiB available < {min_available_gb} GiB floor"
+        )
+
+
+def _mem_available_gb() -> float | None:
+    try:
+        with open("/proc/meminfo", encoding="ascii") as handle:
+            for line in handle:
+                if line.startswith("MemAvailable:"):
+                    return int(line.split()[1]) / (1024 * 1024)
+    except OSError:
+        return None
+    return None
 
 
 def check_child(child: subprocess.Popen[bytes], name: str) -> None:

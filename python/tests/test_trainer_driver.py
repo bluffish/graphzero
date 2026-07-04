@@ -141,3 +141,13 @@ def test_load_config_rejects_unreachable_startup_rows(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError, match="cannot reach"):
         load_config(config_path)
+
+
+def test_memory_watchdog_aborts_below_floor(monkeypatch: pytest.MonkeyPatch) -> None:
+    from gz.trainer import driver
+
+    monkeypatch.setattr(driver, "_mem_available_gb", lambda: 12.0)
+    driver.check_memory(10.0)  # above floor: fine
+    with pytest.raises(RuntimeError, match="12.0 GiB available"):
+        driver.check_memory(40.0)
+    driver.check_memory(0)  # disabled
