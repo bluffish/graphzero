@@ -44,6 +44,15 @@ pub trait GraphEngine {
         options: MeasureOptions,
     ) -> EngineResult<MeasureResult<Self::Graph>>;
 
+    fn release(
+        &mut self,
+        graphs: &[Self::Graph],
+        candidates: &[Self::Candidate],
+    ) -> EngineResult<()> {
+        let _ = (graphs, candidates);
+        Ok(())
+    }
+
     fn export_graph(&self, graph: Self::Graph) -> EngineResult<GraphArtifact>;
 }
 

@@ -127,6 +127,15 @@ pub trait GraphEngine {
         options: MeasureOptions,
     ) -> EngineResult<MeasureResult<Self::Graph>>;
 
+    fn release(
+        &mut self,
+        graphs: &[Self::Graph],
+        candidates: &[Self::Candidate],
+    ) -> EngineResult<()> {
+        let _ = (graphs, candidates);
+        Ok(())
+    }
+
     fn export_graph(&self, graph: Self::Graph) -> EngineResult<GraphArtifact>;
 }
 ```
@@ -144,7 +153,23 @@ callers can reuse allocation without stale entries.
 candidate_info(graph, candidate) must describe the same candidate apply() sees.
 measure(graph, options) measures the supplied graph and owns reward/score
 production for that measurement.
+release(graphs, candidates) frees engine-local resources for handles the caller
+owns. Using a released handle afterwards is a contract violation; engines may
+reuse released slots. The default implementation is a no-op for engines that
+retain handles forever.
 export_graph(graph) is for diagnostics/import-export, never hot-loop state.
+```
+
+Handle ownership:
+
+```text
+The creator of a handle owns it and is responsible for release when downstream
+portable data has been copied. Root sources own the roots they yield; search
+must not release those source-owned roots. Search owns graphs created by
+apply() and candidates created by candidates(). Orchestrator lanes call
+release() after episode projection and replay append/drop handling. release()
+is a lane-thread engine call, not a SearchWork variant; episodes are complete
+before release runs.
 ```
 
 `BatchGraphEngine` defines batch semantics, not async semantics.
