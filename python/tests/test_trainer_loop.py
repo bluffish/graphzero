@@ -45,3 +45,13 @@ def test_value_bce_loss_zero_valid_has_finite_gradient() -> None:
     assert float(loss) == 0.0
     assert value_raw.grad is not None
     assert value_raw.grad.tolist() == [0.0, 0.0]
+
+
+def test_constant_schedule_holds_base_lr_after_warmup() -> None:
+    from gz.trainer.loop import lr_at_step
+
+    assert lr_at_step(3e-4, 5, 10, 1000, "constant") == pytest.approx(1.5e-4)  # warmup ramp
+    assert lr_at_step(3e-4, 500, 10, 1000, "constant") == pytest.approx(3e-4)
+    assert lr_at_step(3e-4, 999999, 10, 1000, "constant") == pytest.approx(3e-4)
+    # cosine still anneals
+    assert lr_at_step(3e-4, 1000, 10, 1000, "cosine") < 1e-8

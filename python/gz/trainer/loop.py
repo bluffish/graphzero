@@ -11,6 +11,7 @@ class LoopConfig:
     lr: float = 3e-4
     warmup_steps: int = 200
     total_steps: int = 1000
+    lr_schedule: str = "cosine"
     value_weight: float = 1.0
     grad_clip: float = 1.0
     weight_decay: float = 0.01
@@ -50,7 +51,13 @@ class TrainerLoop:
         loss = policy_loss + self.config.value_weight * value_loss
         loss.backward()
         grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip)
-        lr = lr_at_step(self.config.lr, self.step_index + 1, self.config.warmup_steps, self.config.total_steps)
+        lr = lr_at_step(
+            self.config.lr,
+            self.step_index + 1,
+            self.config.warmup_steps,
+            self.config.total_steps,
+            self.config.lr_schedule,
+        )
         for group in self.optimizer.param_groups:
             group["lr"] = lr
         self.optimizer.step()
@@ -114,9 +121,17 @@ def value_bce_loss(value_raw: object, value: object, value_valid: object, row_co
     return functional.binary_cross_entropy_with_logits(2.0 * value_raw[valid], target, reduction="mean")
 
 
-def lr_at_step(base_lr: float, step: int, warmup_steps: int, total_steps: int) -> float:
+def lr_at_step(
+    base_lr: float,
+    step: int,
+    warmup_steps: int,
+    total_steps: int,
+    schedule: str = "cosine",
+) -> float:
     if warmup_steps > 0 and step <= warmup_steps:
         return base_lr * step / warmup_steps
+    if schedule == "constant":
+        return base_lr
     if total_steps <= warmup_steps:
         return base_lr
     progress = min(1.0, (step - warmup_steps) / (total_steps - warmup_steps))

@@ -20,6 +20,7 @@ from gz.trainer.sampler import SampleClient, step_seed
 @dataclass(frozen=True, slots=True)
 class TrainerConfig:
     lr: float = 3e-4
+    lr_schedule: str = "cosine"
     warmup_steps: int = 200
     batch: int = 256
     window_rows: int = 200_000
@@ -156,6 +157,7 @@ def run(config_path: str | Path) -> None:
             model,
             LoopConfig(
                 lr=config.trainer.lr,
+                lr_schedule=config.trainer.lr_schedule,
                 warmup_steps=config.trainer.warmup_steps,
                 total_steps=config.trainer.total_steps,
                 value_weight=config.trainer.value_weight,
@@ -403,6 +405,8 @@ class WandbRun:
 
 
 def _validate(config: RunConfig) -> RunConfig:
+    if config.trainer.lr_schedule not in ("cosine", "constant"):
+        raise ValueError(f"unknown lr_schedule: {config.trainer.lr_schedule}")
     ceiling = config.trainer.bootstrap_episodes * config.selfplay.max_steps
     if ceiling < config.trainer.min_startup_rows:
         raise ValueError(
