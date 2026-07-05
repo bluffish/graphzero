@@ -201,9 +201,11 @@ implementation should concentrate lifecycle ownership in one place.
 
 Severity: Medium
 
+Status: Fixed in `2d2de83`.
+
 File:
 
-- `crates/gz-search/src/gumbel.rs`
+- `crates/gz-search/src/gumbel/`
 
 Finding:
 
