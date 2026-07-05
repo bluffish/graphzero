@@ -40,7 +40,11 @@ class TrainerLoop:
         self.optimizer = torch.optim.AdamW(model.parameters(), lr=config.lr, weight_decay=config.weight_decay)
         self.step_index = 0
 
-    def train_step(self, batch: TrainingBatch) -> StepMetrics:
+    def train_step(self, batch: TrainingBatch, with_metrics: bool = True) -> StepMetrics | None:
+        """One optimizer step. With `with_metrics=False` the step enqueues no
+        host-device synchronization at all (no `.item()`/`.cpu()`), so
+        back-to-back steps pipeline on the GPU; callers request metrics only
+        on the steps they log."""
         torch = _torch()
         functional = torch.nn.functional
         self.model.train()
@@ -62,6 +66,9 @@ class TrainerLoop:
             group["lr"] = lr
         self.optimizer.step()
         self.step_index += 1
+
+        if not with_metrics:
+            return None
 
         with torch.no_grad():
             row_mask = _row_mask(torch, batch.row_count, value_raw.shape[0], value_raw.device)
@@ -115,10 +122,17 @@ def value_bce_loss(value_raw: object, value: object, value_valid: object, row_co
     functional = torch.nn.functional
     row_mask = _row_mask(torch, row_count, value_raw.shape[0], value_raw.device)
     valid = row_mask & (value_valid > 0)
-    if not bool(valid.any().item()):
-        return value_raw.sum() * 0.0
-    target = (value[valid] + 1.0) * 0.5
-    return functional.binary_cross_entropy_with_logits(2.0 * value_raw[valid], target, reduction="mean")
+    weight = valid.to(value_raw.dtype)
+    # Fully tensorized: a data-dependent host branch here would synchronize
+    # the CUDA stream between the forward pass and backward, stalling the
+    # GPU mid-step. Invalid rows may carry arbitrary label bytes, so their
+    # targets are zeroed before the pointwise loss and their terms weighted
+    # out; zero valid rows yields loss 0 with finite gradients.
+    target = torch.where(valid, (value + 1.0) * 0.5, torch.zeros_like(value))
+    per_row = functional.binary_cross_entropy_with_logits(
+        2.0 * value_raw, target, reduction="none"
+    )
+    return (per_row * weight).sum() / weight.sum().clamp(min=1.0)
 
 
 def lr_at_step(

@@ -1464,6 +1464,17 @@ where
     }
 }
 
+/// Batches eval jobs and keeps one submitted batch in flight: while batch
+/// N runs on the backend, batch N+1 is collected and submitted before N's
+/// outputs are received, so a pipelining backend (the evaluator process)
+/// overlaps its request read and staging with GPU compute. Non-pipelining
+/// backends compute at submit and the loop degenerates to the historical
+/// serial behavior.
+///
+/// Liveness: while a batch is in flight, collection is bounded by the
+/// flush window and may come up empty (every parked eval can be inside
+/// the in-flight batch, and new jobs only arrive after its replies), so
+/// the loop always progresses to receive-and-route.
 fn run_featurized_batcher<B>(
     mut backend: B,
     mut collator: FeatureCollator,
@@ -1474,61 +1485,98 @@ fn run_featurized_batcher<B>(
 where
     B: FeatureEvalBackend,
 {
+    type Routing = Vec<(usize, usize, WorkToken, u32)>;
+
     let mut batch_sizes = Vec::new();
     let mut batch = Vec::with_capacity(config.max_batch.get());
-    let mut routing = Vec::with_capacity(config.max_batch.get());
     let mut rows = Vec::with_capacity(config.max_batch.get());
     let mut action_counts = Vec::with_capacity(config.max_batch.get());
     let mut bytes = Vec::new();
+    let mut in_flight: Option<(Routing, gz_eval_service::PendingBatch)> = None;
+    let mut intake_open = true;
 
-    loop {
-        let first = match intake_rx.recv() {
-            Ok(job) => job,
-            Err(_) => return Ok(batch_sizes),
-        };
+    while intake_open || in_flight.is_some() {
         batch.clear();
-        batch.push(first);
-        let deadline = Instant::now() + config.flush_after;
-
-        while batch.len() < config.max_batch.get() {
-            let now = Instant::now();
-            let remaining = deadline.saturating_duration_since(now);
-            match intake_rx.recv_timeout(remaining) {
-                Ok(job) => batch.push(job),
-                Err(RecvTimeoutError::Timeout | RecvTimeoutError::Disconnected) => break,
+        if intake_open {
+            if in_flight.is_none() {
+                // Nothing on the backend: block for work.
+                match intake_rx.recv() {
+                    Ok(job) => batch.push(job),
+                    Err(_) => intake_open = false,
+                }
+            } else {
+                // A batch is in flight: collect only within the flush
+                // window so its replies are never held hostage to intake.
+                match intake_rx.recv_timeout(config.flush_after) {
+                    Ok(job) => batch.push(job),
+                    Err(RecvTimeoutError::Timeout) => {}
+                    Err(RecvTimeoutError::Disconnected) => intake_open = false,
+                }
+            }
+            if !batch.is_empty() {
+                let deadline = Instant::now() + config.flush_after;
+                while batch.len() < config.max_batch.get() {
+                    let remaining = deadline.saturating_duration_since(Instant::now());
+                    match intake_rx.recv_timeout(remaining) {
+                        Ok(job) => batch.push(job),
+                        Err(RecvTimeoutError::Timeout) => break,
+                        Err(RecvTimeoutError::Disconnected) => {
+                            intake_open = false;
+                            break;
+                        }
+                    }
+                }
             }
         }
 
-        routing.clear();
-        rows.clear();
-        action_counts.clear();
-        for job in batch.drain(..) {
-            routing.push((job.lane, job.slot, job.token, job.action_count));
-            action_counts.push(job.action_count);
-            rows.push(job.row);
+        let submitted = if batch.is_empty() {
+            None
+        } else {
+            let mut routing: Routing = Vec::with_capacity(batch.len());
+            rows.clear();
+            action_counts.clear();
+            for job in batch.drain(..) {
+                routing.push((job.lane, job.slot, job.token, job.action_count));
+                action_counts.push(job.action_count);
+                rows.push(job.row);
+            }
+            collator
+                .collate_into(&rows, &mut bytes)
+                .map_err(|_| internal("feature collation failed"))?;
+            let pending = backend
+                .submit(&bytes, &action_counts)
+                .map_err(|_| internal("feature eval backend failed"))?;
+            Some((routing, pending))
+        };
+
+        if let Some((routing, pending)) = in_flight.take() {
+            let outputs = backend
+                .receive(pending)
+                .map_err(|_| internal("feature eval backend failed"))?;
+            let counts = routing
+                .iter()
+                .map(|&(_, _, _, action_count)| action_count)
+                .collect::<Vec<_>>();
+            validate_backend_outputs(&outputs, &counts)?;
+            batch_sizes.push(routing.len());
+
+            for ((lane, slot, token, _), row) in routing.into_iter().zip(outputs.rows) {
+                let _ = reply_txs[lane].send(EvalReply {
+                    slot,
+                    token,
+                    output: EvalOutput {
+                        model_version: outputs.model_version,
+                        policy_logits: row.policy_logits,
+                        value: row.value,
+                    },
+                });
+            }
         }
 
-        collator
-            .collate_into(&rows, &mut bytes)
-            .map_err(|_| internal("feature collation failed"))?;
-        let outputs = backend
-            .eval(&bytes, &action_counts)
-            .map_err(|_| internal("feature eval backend failed"))?;
-        validate_backend_outputs(&outputs, &action_counts)?;
-        batch_sizes.push(routing.len());
-
-        for ((lane, slot, token, _), row) in routing.drain(..).zip(outputs.rows) {
-            let _ = reply_txs[lane].send(EvalReply {
-                slot,
-                token,
-                output: EvalOutput {
-                    model_version: outputs.model_version,
-                    policy_logits: row.policy_logits,
-                    value: row.value,
-                },
-            });
-        }
+        in_flight = submitted;
     }
+
+    Ok(batch_sizes)
 }
 
 fn validate_backend_outputs(outputs: &BackendOutputs, action_counts: &[u32]) -> EngineResult<()> {

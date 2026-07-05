@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import os
+import queue
 import signal
 import subprocess
 import sys
+import threading
 import time
 import tomllib
 from dataclasses import asdict, dataclass
@@ -38,6 +40,15 @@ class TrainerConfig:
     step_sleep: float = 0.0
     bootstrap_episodes: int = 64
     min_available_gb: float = 40.0
+    # Sample batch N+1 on a background thread while the GPU trains batch N,
+    # taking the socket read/decode off the step critical path. Off = the
+    # historical strictly-serial loop, kept for A/B comparison.
+    prefetch: bool = True
+    # Continue an interrupted run in place: skip bootstrap, load the latest
+    # published checkpoint (EMA weights seed both the live model and the
+    # EMA -- an approximate resume; optimizer moments restart), and start
+    # the step counter at the checkpoint's training_step.
+    resume: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +78,8 @@ class WandbConfig:
     entity: str = ""
     run_name: str = ""
     mode: str = ""
+    # Resume this wandb run id in place (wandb.init(resume="must")).
+    run_id: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,43 +106,48 @@ def run(config_path: str | Path) -> None:
         path.mkdir(parents=True, exist_ok=True)
     metrics = MetricsWriter(config.paths.run_dir / "metrics.jsonl", WandbRun.start(config))
 
-    bootstrap_selfplay(config)
-    serve = spawn_replay_serve(config)
-    try:
-        sampler = SampleClient(
-            config.paths.sample_socket,
-            startup_timeout=config.trainer.startup_timeout,
-            reconnect_limit=config.trainer.reconnect_limit,
-        )
-        sampler.wait_until_ready(
-            config.trainer.min_startup_rows,
-            alive_check=lambda: check_child(serve, "replay-serve"),
-        )
-        arch = config.arch
-        model = build_model(sampler.feature_schema, arch).to(config.trainer.device)
-        ema = EmaWeights(model, config.trainer.ema_decay)
-        first = publish_ema(
-            config.paths.checkpoint_dir,
-            ema,
-            schema=sampler.feature_schema,
-            schema_hash=sampler.feature_schema_hash,
-            arch=arch,
-            training_step=0,
-            run_id=config.paths.run_dir.name,
-        )
-        param_norm, _ = ema.norms(None)
-        published_snapshot = ema.state_dict()
-        metrics.write(
-            {
-                "event": "publish",
-                "training_step": 0,
-                "model_version": first.model_version.hex(),
-                "param_norm": param_norm,
-                "update_norm": 0.0,
-            }
-        )
-    finally:
-        stop_child(serve)
+    arch = config.arch
+    model = None
+    ema = None
+    published_snapshot = None
+    resume_start = 0
+    if not config.trainer.resume:
+        bootstrap_selfplay(config)
+        serve = spawn_replay_serve(config)
+        try:
+            sampler = SampleClient(
+                config.paths.sample_socket,
+                startup_timeout=config.trainer.startup_timeout,
+                reconnect_limit=config.trainer.reconnect_limit,
+            )
+            sampler.wait_until_ready(
+                config.trainer.min_startup_rows,
+                alive_check=lambda: check_child(serve, "replay-serve"),
+            )
+            model = build_model(sampler.feature_schema, arch).to(config.trainer.device)
+            ema = EmaWeights(model, config.trainer.ema_decay)
+            first = publish_ema(
+                config.paths.checkpoint_dir,
+                ema,
+                schema=sampler.feature_schema,
+                schema_hash=sampler.feature_schema_hash,
+                arch=arch,
+                training_step=0,
+                run_id=config.paths.run_dir.name,
+            )
+            param_norm, _ = ema.norms(None)
+            published_snapshot = ema.state_dict()
+            metrics.write(
+                {
+                    "event": "publish",
+                    "training_step": 0,
+                    "model_version": first.model_version.hex(),
+                    "param_norm": param_norm,
+                    "update_norm": 0.0,
+                }
+            )
+        finally:
+            stop_child(serve)
 
     selfplay = spawn_torch_selfplay(config)
     try:
@@ -142,7 +160,7 @@ def run(config_path: str | Path) -> None:
             config.trainer.min_startup_rows,
             alive_check=lambda: check_child(selfplay, "selfplay"),
         )
-        if ready_ack.root is not None:
+        if ready_ack.root is not None and not config.trainer.resume:
             metrics.write(
                 {
                     "event": "graph",
@@ -150,6 +168,29 @@ def run(config_path: str | Path) -> None:
                     "root_nodes": ready_ack.root.node_count,
                     "root_edges": ready_ack.root.edge_count,
                     "root_candidates": ready_ack.root.candidate_count,
+                }
+            )
+        if config.trainer.resume:
+            from gz.checkpoints import DirectorySource
+            from gz.checkpoints.weights import load_state_dict
+
+            resolved = DirectorySource(str(config.paths.checkpoint_dir)).resolve_latest()
+            if resolved.manifest.feature_schema_hash != sampler.feature_schema_hash:
+                raise RuntimeError("resume checkpoint feature schema does not match the store")
+            if ArchConfig.from_dict(resolved.manifest.arch_config) != arch:
+                raise RuntimeError("resume checkpoint arch does not match [arch] config")
+            model = build_model(sampler.feature_schema, arch).to(config.trainer.device)
+            model.load_state_dict(load_state_dict(resolved.weights_path))
+            ema = EmaWeights(model, config.trainer.ema_decay)
+            published_snapshot = ema.state_dict()
+            resume_start = resolved.manifest.training_step
+            if resume_start >= config.trainer.total_steps:
+                raise RuntimeError("resume checkpoint is at or past total_steps")
+            metrics.write(
+                {
+                    "event": "resume",
+                    "training_step": resume_start,
+                    "model_version": resolved.manifest.model_version.hex(),
                 }
             )
         stager = TrainingStager(sampler.feature_schema, config.trainer.batch, config.trainer.device)
@@ -164,23 +205,47 @@ def run(config_path: str | Path) -> None:
                 grad_clip=config.trainer.grad_clip,
             ),
         )
+        loop.step_index = resume_start
         window = PerfWindow()
-        for step in range(config.trainer.total_steps):
+        prefetcher = None
+        if config.trainer.prefetch:
+            prefetcher = SamplePrefetcher(
+                sampler,
+                config.trainer.batch,
+                config.trainer.window_rows,
+                config.trainer.seed,
+                config.trainer.total_steps,
+                start_step=resume_start,
+            )
+            prefetcher.start()
+        for step in range(resume_start, config.trainer.total_steps):
             check_child(selfplay, "selfplay")
             if step % 50 == 0:
                 check_memory(config.trainer.min_available_gb)
+            # With prefetch, sample_ms measures the wait for the queued
+            # batch: ~0 while sampling keeps up, the residual stall when it
+            # does not.
             sample_started = time.perf_counter()
-            result = sampler.sample(
-                config.trainer.batch,
-                config.trainer.window_rows,
-                step_seed(config.trainer.seed, step),
-            )
+            if prefetcher is not None:
+                result = prefetcher.next()
+            else:
+                result = sampler.sample(
+                    config.trainer.batch,
+                    config.trainer.window_rows,
+                    step_seed(config.trainer.seed, step),
+                )
             train_started = time.perf_counter()
-            metrics_record = loop.train_step(stager.copy(result.batch, result.targets))
+            # Metrics force a host-device sync; off-interval steps skip them
+            # entirely so consecutive steps pipeline on the GPU.
+            metrics_step = step % config.trainer.log_interval == 0
+            metrics_record = loop.train_step(
+                stager.copy(result.batch, result.targets), with_metrics=metrics_step
+            )
             ema.update(model)
             window.record(sample_started, train_started, time.perf_counter())
-            if step % config.trainer.log_interval == 0:
-                ack = sampler.refresh()
+            if metrics_step:
+                assert metrics_record is not None
+                ack = prefetcher.refresh() if prefetcher is not None else sampler.refresh()
                 produced = ack.produced_rows
                 stop_rate = ack.episodes_stopped / ack.episodes if ack.episodes else 0.0
                 record = {
@@ -236,6 +301,8 @@ def run(config_path: str | Path) -> None:
                 )
             if config.trainer.step_sleep:
                 time.sleep(config.trainer.step_sleep)
+        if prefetcher is not None:
+            prefetcher.stop()
         if config.trainer.total_steps % config.trainer.publish_interval != 0:
             final = publish_ema(
                 config.paths.checkpoint_dir,
@@ -281,6 +348,76 @@ class MetricsWriter:
         self.handle.close()
         if self.wandb_run is not None:
             self.wandb_run.finish()
+
+
+class SamplePrefetcher:
+    """Keeps one sample batch in flight on a background thread so the socket
+    read and decode overlap GPU training. Owns all sampler socket use after
+    start(): the internal lock serializes the sample loop against refresh(),
+    which would otherwise interleave protocol frames on the shared stream.
+    Errors raised while sampling surface on the consumer's next()."""
+
+    def __init__(
+        self,
+        sampler: SampleClient,
+        batch: int,
+        window_rows: int,
+        seed: int,
+        total_steps: int,
+        start_step: int = 0,
+    ) -> None:
+        self._sampler = sampler
+        self._batch = batch
+        self._window_rows = window_rows
+        self._seed = seed
+        self._total_steps = total_steps
+        self._start_step = start_step
+        self._queue: queue.Queue = queue.Queue(maxsize=1)
+        self._lock = threading.Lock()
+        self._stop = threading.Event()
+        self._thread = threading.Thread(target=self._run, name="sample-prefetch", daemon=True)
+
+    def start(self) -> None:
+        self._thread.start()
+
+    def stop(self) -> None:
+        self._stop.set()
+        # Unblock a full queue so the thread can observe the stop flag.
+        try:
+            self._queue.get_nowait()
+        except queue.Empty:
+            pass
+
+    def next(self) -> object:
+        result, error = self._queue.get()
+        if error is not None:
+            raise error
+        return result
+
+    def refresh(self) -> object:
+        with self._lock:
+            return self._sampler.refresh()
+
+    def _run(self) -> None:
+        for step in range(self._start_step, self._total_steps):
+            if self._stop.is_set():
+                return
+            try:
+                with self._lock:
+                    result = self._sampler.sample(
+                        self._batch,
+                        self._window_rows,
+                        step_seed(self._seed, step),
+                    )
+            except BaseException as error:  # surfaced on next()
+                self._queue.put((None, error))
+                return
+            while not self._stop.is_set():
+                try:
+                    self._queue.put((result, None), timeout=1.0)
+                    break
+                except queue.Full:
+                    continue
 
 
 class PerfWindow:
@@ -369,7 +506,13 @@ class WandbRun:
                 entity=config.wandb.entity or None,
                 name=config.wandb.run_name or config.paths.run_dir.name,
                 mode=config.wandb.mode or None,
-                config={
+                id=config.wandb.run_id or None,
+                resume="must" if config.wandb.run_id else None,
+                # A resumed run keeps its original config; re-sending it
+                # would conflict on any knob the resume changed.
+                config=None
+                if config.wandb.run_id
+                else {
                     "trainer": asdict(config.trainer),
                     "selfplay": asdict(config.selfplay),
                     "arch": asdict(config.arch),

@@ -12,7 +12,7 @@ mod hello;
 mod process;
 mod stub;
 
-pub use backend::{BackendOutputs, FeatureEvalBackend, StubBackend};
+pub use backend::{BackendOutputs, FeatureEvalBackend, PendingBatch, StubBackend};
 pub use error::{ServiceError, ServiceResult};
 pub use frames::{
     FRAME_ERROR, FRAME_EVAL, FRAME_EVAL_RESULT, FRAME_HELLO, FRAME_HELLO_ACK, FRAME_PING,

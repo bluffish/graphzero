@@ -1,7 +1,7 @@
 use crate::{
     BackendOutputs, FRAME_ERROR, FRAME_EVAL, FRAME_EVAL_RESULT, FRAME_HELLO, FRAME_HELLO_ACK,
-    FRAME_PING, FRAME_PONG, FeatureEvalBackend, Hello, HelloAck, PROTOCOL_VERSION, ServiceError,
-    ServiceResult, decode_error, read_frame, write_frame,
+    FRAME_PING, FRAME_PONG, FeatureEvalBackend, Hello, HelloAck, PROTOCOL_VERSION, PendingBatch,
+    ServiceError, ServiceResult, decode_error, read_frame, write_frame,
 };
 use gz_engine::ModelVersion;
 use gz_features::{decode_outputs, validate_batch_action_counts};
@@ -231,6 +231,15 @@ impl ProcessBackend {
 
 impl FeatureEvalBackend for ProcessBackend {
     fn eval(&mut self, batch_bytes: &[u8], action_counts: &[u32]) -> ServiceResult<BackendOutputs> {
+        let pending = self.submit(batch_bytes, action_counts)?;
+        self.receive(pending)
+    }
+
+    /// Sends the batch and returns immediately; the evaluator process
+    /// stages and runs it while the caller collects the next batch. The
+    /// stream is FIFO, so one submitted batch may be outstanding while
+    /// its predecessor's result is read.
+    fn submit(&mut self, batch_bytes: &[u8], action_counts: &[u32]) -> ServiceResult<PendingBatch> {
         validate_batch_action_counts(batch_bytes, action_counts)
             .map_err(|error| ServiceError::protocol(error.to_string()))?;
 
@@ -244,9 +253,24 @@ impl FeatureEvalBackend for ProcessBackend {
             &[&batch_id_bytes, batch_bytes],
         )?;
 
+        Ok(PendingBatch::InFlight {
+            batch_id,
+            action_counts: action_counts.to_vec(),
+        })
+    }
+
+    fn receive(&mut self, pending: PendingBatch) -> ServiceResult<BackendOutputs> {
+        let (batch_id, action_counts) = match pending {
+            PendingBatch::Ready(outputs) => return Ok(outputs),
+            PendingBatch::InFlight {
+                batch_id,
+                action_counts,
+            } => (batch_id, action_counts),
+        };
+
         let (frame_type, payload) = read_frame(&mut self.stream, &mut self.read_buf)?;
         match frame_type {
-            FRAME_EVAL_RESULT => decode_eval_result(payload, batch_id, action_counts),
+            FRAME_EVAL_RESULT => decode_eval_result(payload, batch_id, &action_counts),
             FRAME_ERROR => Err(error_payload(payload)),
             _ => Err(ServiceError::protocol("expected EVAL_RESULT")),
         }

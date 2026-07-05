@@ -4,6 +4,37 @@ use gz_features::{FeatureBatchView, RowOutput};
 
 pub trait FeatureEvalBackend {
     fn eval(&mut self, batch_bytes: &[u8], action_counts: &[u32]) -> ServiceResult<BackendOutputs>;
+
+    /// Submits a batch without waiting for its outputs; pair with
+    /// `receive`. Backends that cannot overlap compute simply evaluate
+    /// here (the default), so callers may pipeline unconditionally:
+    /// submit the next batch, then receive the previous one. At most one
+    /// batch may be pending per backend, and submit/receive alternate
+    /// FIFO.
+    fn submit(&mut self, batch_bytes: &[u8], action_counts: &[u32]) -> ServiceResult<PendingBatch> {
+        Ok(PendingBatch::Ready(self.eval(batch_bytes, action_counts)?))
+    }
+
+    fn receive(&mut self, pending: PendingBatch) -> ServiceResult<BackendOutputs> {
+        match pending {
+            PendingBatch::Ready(outputs) => Ok(outputs),
+            PendingBatch::InFlight { .. } => Err(ServiceError::protocol(
+                "backend cannot receive in-flight batches",
+            )),
+        }
+    }
+}
+
+/// A submitted batch awaiting `receive`. `Ready` is the non-pipelining
+/// default (outputs computed at submit); `InFlight` is a batch on the
+/// wire of a pipelining backend.
+#[derive(Clone, Debug, PartialEq)]
+pub enum PendingBatch {
+    Ready(BackendOutputs),
+    InFlight {
+        batch_id: u64,
+        action_counts: Vec<u32>,
+    },
 }
 
 #[derive(Clone, Debug, PartialEq)]

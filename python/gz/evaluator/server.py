@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import select
 import socket
 import struct
 from dataclasses import dataclass
@@ -67,16 +68,36 @@ def serve(socket_path: str | Path, backend: StubBackend, *, ready_event: Event |
 def _serve_connection(conn: socket.socket, backend: StubBackend) -> None:
     read_buf = bytearray()
     write_buf = bytearray()
+    # One launched-but-unfinished eval: (batch_id, backend pending handle).
+    # The pipeline order per EVAL frame is stage(new) -> finish(pending) ->
+    # write reply -> swap check -> launch(new), which overlaps this frame's
+    # read+staging with the previous batch's GPU time while preserving
+    # FIFO replies. finish must precede launch: CUDA-graph runners reuse
+    # static output buffers.
+    pending: tuple[int, object] | None = None
     try:
         state = _handshake(conn, read_buf, write_buf, backend)
         while True:
+            if pending is not None:
+                # Only hold the pending batch open if the next request is
+                # already on the wire; otherwise the client is blocked on
+                # this reply (read_frame never over-reads, so socket
+                # readability is the complete signal).
+                readable, _, _ = select.select([conn], [], [], 0)
+                if not readable:
+                    pending = _flush_pending(conn, write_buf, backend, pending)
             frame_type, payload = read_frame(conn, read_buf)
             try:
-                backend.apply_pending_swap()
                 if frame_type == FRAME_PING:
+                    pending = _flush_pending(conn, write_buf, backend, pending)
                     _handle_ping(conn, write_buf, payload)
                 elif frame_type == FRAME_EVAL:
-                    _handle_eval(conn, write_buf, backend, state, payload)
+                    batch_id, view = _parse_eval(state, payload)
+                    staged = backend.stage(view)
+                    del view
+                    pending = _flush_pending(conn, write_buf, backend, pending)
+                    backend.apply_pending_swap()
+                    pending = (batch_id, backend.launch(staged))
                 else:
                     raise ProtocolError(ERROR_PROTOCOL, "unexpected frame type")
             finally:
@@ -128,13 +149,7 @@ def _handle_ping(conn: socket.socket, write_buf: bytearray, payload: memoryview)
     write_frame_into(conn, write_buf, FRAME_PONG, payload)
 
 
-def _handle_eval(
-    conn: socket.socket,
-    write_buf: bytearray,
-    backend: StubBackend,
-    state: _ConnectionState,
-    payload: memoryview,
-) -> None:
+def _parse_eval(state: _ConnectionState, payload: memoryview) -> tuple[int, BatchView]:
     if len(payload) < 8:
         raise ProtocolError(ERROR_MALFORMED, "EVAL frame truncated")
     batch_id = struct.unpack_from("<Q", payload, 0)[0]
@@ -146,7 +161,19 @@ def _handle_eval(
         raise ProtocolError(ERROR_SCHEMA, "feature schema hash mismatch")
     if batch.batch_capacity != state.batch_capacity:
         raise ProtocolError(ERROR_CAPACITY, "batch capacity mismatch")
-    result = backend.eval(batch)
+    return batch_id, batch
+
+
+def _flush_pending(
+    conn: socket.socket,
+    write_buf: bytearray,
+    backend: StubBackend,
+    pending: tuple[int, object] | None,
+) -> None:
+    if pending is None:
+        return None
+    batch_id, handle = pending
+    result = backend.finish(handle)
     write_frame_into(
         conn,
         write_buf,
@@ -155,6 +182,7 @@ def _handle_eval(
         bytes(result.model_version),
         result.payload,
     )
+    return None
 
 
 def _send_error(conn: socket.socket, write_buf: bytearray, code: int, message: str) -> None:

@@ -23,6 +23,16 @@ class EvalResult:
     payload: memoryview
 
 
+# The pipelined serving contract: stage(view) copies everything it needs
+# out of the request buffer (the view dies when the next frame is read),
+# launch(staged) enqueues compute without waiting for it, finish(pending)
+# waits and encodes. The server interleaves them as
+#   stage(N+1) -> finish(N) -> write reply(N) -> launch(N+1)
+# so the socket read and staging of N+1 overlap N's GPU time. finish(N)
+# MUST complete before launch(N+1): CUDA-graph runners reuse static
+# output buffers, and the next replay overwrites them.
+
+
 class StubBackend:
     def __init__(self) -> None:
         self._encoder: OutputEncoder | None = None
@@ -47,12 +57,41 @@ class StubBackend:
             payload=self._encoder.encode(values, logits, view.row_count),
         )
 
+    # The stub computes eagerly at stage; the payload is copied because the
+    # encoder buffer would otherwise be clobbered by the next stage before
+    # the pipelined server writes this reply.
+    def stage(self, view: BatchView) -> EvalResult:
+        result = self.eval(view)
+        return EvalResult(model_version=result.model_version, payload=memoryview(bytes(result.payload)))
+
+    def launch(self, staged: EvalResult) -> EvalResult:
+        return staged
+
+    def finish(self, pending: EvalResult) -> EvalResult:
+        return pending
+
 
 @dataclass(frozen=True, slots=True)
 class _ServingSlot:
     manifest: object
     runner: object
     model_version: ModelVersion
+
+
+@dataclass(frozen=True, slots=True)
+class StagedEval:
+    tensors: object
+    row_count: int
+    encoder: OutputEncoder
+
+
+@dataclass(frozen=True, slots=True)
+class PendingEval:
+    model_version: ModelVersion
+    value_raw: object
+    logits: object
+    row_count: int
+    encoder: OutputEncoder
 
 
 class TorchBackend:
@@ -77,6 +116,8 @@ class TorchBackend:
         self._active = self._build_slot(self.resolved)
         self.manifest = self._active.manifest
         self.stager: BatchStager | None = None
+        self._stagers: tuple[BatchStager, ...] = ()
+        self._stage_index = 0
         self._encoder: OutputEncoder | None = None
         self._pending: _ServingSlot | None = None
         self._pending_lock = threading.Lock()
@@ -90,6 +131,14 @@ class TorchBackend:
         if hello.batch_capacity > self.max_batch:
             raise ProtocolError(ERROR_CAPACITY, "batch capacity exceeds backend maximum")
         self.stager = BatchStager(self._active.manifest.feature_schema, hello.batch_capacity, self.device)
+        # Ping-pong staging: stage(N+1) runs while N's H2D copy may still
+        # be in flight from the same buffers, so batches alternate between
+        # two independent staging sets.
+        self._stagers = (
+            self.stager,
+            BatchStager(self._active.manifest.feature_schema, hello.batch_capacity, self.device),
+        )
+        self._stage_index = 0
         self._warm_runner(self._active.runner, self.stager, WARMUP_RUNS)
         if self.poll_interval > 0.0:
             self._start_loader()
@@ -134,6 +183,9 @@ class TorchBackend:
         self._stop_polling.set()
 
     def eval(self, view: BatchView) -> EvalResult:
+        return self.finish(self.launch(self.stage(view)))
+
+    def stage(self, view: BatchView) -> StagedEval:
         if self.stager is None:
             raise RuntimeError("torch backend used before handshake")
         if (
@@ -142,16 +194,31 @@ class TorchBackend:
             or self._encoder.max_actions != view.max_actions
         ):
             self._encoder = OutputEncoder(view.batch_capacity, view.max_actions)
-        tensors = self.stager.copy(view)
+        stager = self._stagers[self._stage_index]
+        self._stage_index = 1 - self._stage_index
+        # The encoder rides with the batch: finish() runs after the NEXT
+        # batch was staged, which may have re-keyed self._encoder.
+        return StagedEval(tensors=stager.copy(view), row_count=view.row_count, encoder=self._encoder)
+
+    def launch(self, staged: StagedEval) -> PendingEval:
         active = self._active
-        value_raw, logits = self._run_runner(active.runner, tensors)
+        value_raw, logits = self._run_runner(active.runner, staged.tensors)
+        return PendingEval(
+            model_version=active.model_version,
+            value_raw=value_raw,
+            logits=logits,
+            row_count=staged.row_count,
+            encoder=staged.encoder,
+        )
+
+    def finish(self, pending: PendingEval) -> EvalResult:
         torch = _torch()
         return EvalResult(
-            model_version=active.model_version,
-            payload=self._encoder.encode(
-                torch.tanh(value_raw).detach().float().cpu().numpy(),
-                logits.detach().float().cpu().numpy(),
-                view.row_count,
+            model_version=pending.model_version,
+            payload=pending.encoder.encode(
+                torch.tanh(pending.value_raw).detach().float().cpu().numpy(),
+                pending.logits.detach().float().cpu().numpy(),
+                pending.row_count,
             ),
         )
 
