@@ -1,11 +1,11 @@
 use crate::EpisodeId;
 use crate::pool::{Admission, WorkerPool};
 use crate::project::project_episode;
-use crate::reference::{Reference, ReferenceProvider};
+use crate::reference::{Reference, ReferenceProvider, RolloutOutcome};
 use crate::root::RootSource;
 use crate::serial::OrchestratedEpisode;
 use crate::service::internal;
-use gz_engine::{EngineResult, GraphEngine};
+use gz_engine::{EngineResult, GraphEngine, ModelVersion};
 use gz_eval::{EvalOutput, EvalRequest, Evaluator, eval_error_to_engine_error, validate_outputs};
 use gz_eval_service::{BackendOutputs, FeatureEvalBackend};
 use gz_features::{
@@ -690,9 +690,17 @@ where
     let mut roots_exhausted = false;
     let mut next_episode_id = (runtime.lane as u64) << 32;
     let mut episodes_dropped = 0;
+    let mut rollout = OpponentRollout::new(runtime.search, identity, runtime.context);
 
     loop {
         if !roots_exhausted {
+            rollout.try_admit(
+                &mut pool,
+                &mut engine,
+                &mut roots,
+                &mut provider,
+                &mut next_episode_id,
+            )?;
             if replay_gate_open(runtime.store, runtime.backpressure) {
                 let mut admission = Admission {
                     search: runtime.search,
@@ -718,6 +726,9 @@ where
         }
 
         for mut completed in pool.drive(&mut engine, "worker blocked", None)? {
+            if rollout.intercept(&mut engine, &mut provider, &completed)? {
+                continue;
+            }
             let reference = references
                 .remove(&completed.episode_id)
                 .ok_or_else(|| internal("missing replay reference"))?;
@@ -766,11 +777,15 @@ where
                 .reply_rx
                 .recv()
                 .map_err(|_| internal("eval backend unavailable"))?;
+            rollout.observe_version(reply.output.model_version);
             pool.resume(reply.slot, reply.token, reply.output)?;
 
             loop {
                 match runtime.reply_rx.try_recv() {
-                    Ok(reply) => pool.resume(reply.slot, reply.token, reply.output)?,
+                    Ok(reply) => {
+                        rollout.observe_version(reply.output.model_version);
+                        pool.resume(reply.slot, reply.token, reply.output)?;
+                    }
                     Err(TryRecvError::Empty) => break,
                     Err(TryRecvError::Disconnected) => {
                         return Err(internal("eval backend unavailable"));
@@ -850,9 +865,17 @@ where
     let mut roots_exhausted = false;
     let mut next_episode_id = (runtime.lane as u64) << 32;
     let mut episodes_dropped = 0;
+    let mut rollout = OpponentRollout::new(runtime.search, identity, runtime.context);
 
     loop {
         if !roots_exhausted {
+            rollout.try_admit(
+                &mut pool,
+                &mut engine,
+                &mut roots,
+                &mut provider,
+                &mut next_episode_id,
+            )?;
             if replay_gate_open(runtime.store, runtime.backpressure) {
                 let mut admission = Admission {
                     search: runtime.search,
@@ -874,6 +897,9 @@ where
         }
 
         for mut completed in pool.drive(&mut engine, "worker blocked", Some(&mut extractor))? {
+            if rollout.intercept(&mut engine, &mut provider, &completed)? {
+                continue;
+            }
             let reference = references
                 .remove(&completed.episode_id)
                 .ok_or_else(|| internal("missing replay reference"))?;
@@ -916,8 +942,10 @@ where
             });
         }
 
-        if pool.has_parked() {
-            receive_replies(&mut pool, &runtime.reply_rx)?;
+        if pool.has_parked()
+            && let Some(version) = receive_replies(&mut pool, &runtime.reply_rx)?
+        {
+            rollout.observe_version(version);
         }
     }
 }
@@ -1019,6 +1047,116 @@ where
     engine.release(&episode.created_graphs, &candidates)
 }
 
+/// Drives opponent rollout episodes for rollout-based reference providers
+/// (the policy opponent). Tracks the newest model version seen on eval
+/// replies; when the provider reports a rollout due, admits one greedy
+/// (single-simulation, no-noise) episode from the fixed root and feeds
+/// its measured terminal reward back to the provider. Rollout episodes
+/// never reach the replay store or the run summary.
+struct OpponentRollout {
+    search: GumbelMcts,
+    identity: EngineIdentity,
+    context: GumbelEpisodeContext,
+    latest_version: Option<ModelVersion>,
+    in_flight: Option<EpisodeId>,
+}
+
+impl OpponentRollout {
+    fn new(search: &GumbelMcts, identity: EngineIdentity, context: GumbelEpisodeContext) -> Self {
+        Self {
+            search: search.policy_rollout(),
+            identity,
+            context,
+            latest_version: None,
+            in_flight: None,
+        }
+    }
+
+    fn observe_version(&mut self, version: ModelVersion) {
+        self.latest_version = Some(version);
+    }
+
+    /// Runs before root admission so a busy pool cannot starve the
+    /// rollout: the freed slot goes to the rollout first.
+    fn try_admit<E, R, P>(
+        &mut self,
+        pool: &mut WorkerPool<E::Graph, E::Candidate>,
+        engine: &mut E,
+        roots: &mut R,
+        provider: &mut P,
+        next_episode_id: &mut u64,
+    ) -> EngineResult<()>
+    where
+        E: GraphEngine,
+        R: RootSource<E>,
+        P: ReferenceProvider<E>,
+    {
+        if self.in_flight.is_some() {
+            return Ok(());
+        }
+        let Some(version) = self.latest_version else {
+            return Ok(());
+        };
+        if !provider.rollout_due(Some(version)) {
+            return Ok(());
+        }
+        let Some(root) = roots.fixed_root(engine)? else {
+            return Ok(());
+        };
+
+        let episode_id = EpisodeId::new(*next_episode_id);
+        let admitted = pool.admit_direct(
+            &self.search,
+            self.identity,
+            root,
+            GumbelEpisodeContext {
+                noise_seed: 0,
+                ..self.context
+            },
+            episode_id,
+        );
+        if admitted {
+            *next_episode_id += 1;
+            provider.begin_rollout(version);
+            self.in_flight = Some(episode_id);
+        }
+        Ok(())
+    }
+
+    /// Claims a completed rollout episode: releases its handles and
+    /// reports the outcome to the provider. Returns true when the episode
+    /// was a rollout and must not be projected, appended, or counted.
+    fn intercept<E, P>(
+        &mut self,
+        engine: &mut E,
+        provider: &mut P,
+        completed: &OrchestratedEpisode<E::Graph, E::Candidate>,
+    ) -> EngineResult<bool>
+    where
+        E: GraphEngine,
+        P: ReferenceProvider<E>,
+    {
+        if self.in_flight != Some(completed.episode_id) {
+            return Ok(false);
+        }
+        self.in_flight = None;
+        release_episode_handles(engine, &completed.episode, &[])?;
+
+        let measure = &completed.episode.final_measure;
+        let reward = if measure.measured && measure.valid {
+            measure.scalar_reward.filter(|reward| reward.is_finite())
+        } else {
+            None
+        };
+        provider.finish_rollout(reward.map(|final_reward| RolloutOutcome {
+            final_reward,
+            final_graph: completed.episode.final_context,
+            search_config_hash: completed.episode.search_config_hash,
+        }));
+        Ok(true)
+    }
+}
+
 fn clear_replayed_episode_trace<G, C>(episode: &mut GumbelEpisode<G, C>) {
     // Drop the backing buffers, not just the elements: clear() keeps
     // capacity, and created_candidates alone reaches millions of ids per
@@ -1042,10 +1180,12 @@ fn append_replay_job(
     done.recv().map_err(|_| internal("replay sink failed"))?
 }
 
+/// Resumes every pending reply; returns the newest model version seen so
+/// callers can drive version-triggered opponent rollouts.
 fn receive_replies<G, C>(
     pool: &mut WorkerPool<G, C>,
     reply_rx: &Receiver<EvalReply>,
-) -> EngineResult<()>
+) -> EngineResult<Option<ModelVersion>>
 where
     G: Copy + Eq,
     C: Copy,
@@ -1053,12 +1193,16 @@ where
     let reply = reply_rx
         .recv()
         .map_err(|_| internal("eval backend unavailable"))?;
+    let mut version = reply.output.model_version;
     pool.resume(reply.slot, reply.token, reply.output)?;
 
     loop {
         match reply_rx.try_recv() {
-            Ok(reply) => pool.resume(reply.slot, reply.token, reply.output)?,
-            Err(TryRecvError::Empty) => return Ok(()),
+            Ok(reply) => {
+                version = reply.output.model_version;
+                pool.resume(reply.slot, reply.token, reply.output)?;
+            }
+            Err(TryRecvError::Empty) => return Ok(Some(version)),
             Err(TryRecvError::Disconnected) => return Err(internal("eval backend unavailable")),
         }
     }

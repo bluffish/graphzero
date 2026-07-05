@@ -203,7 +203,14 @@ reference kinds:
   amortized across every episode from that root
   Greedy/Beam/Random: algorithmic reference trajectories for cheap-measure
   engines; their search_config_hash records the reference kernel config
-  Gumbel: future frozen-checkpoint opponent trajectory reference
+  Gumbel: the policy opponent -- the terminal reward of a greedy
+  (one-simulation, no-noise, temperature-0) rollout of the current
+  published checkpoint from the fixed root, replayed once per observed
+  model version; model_version records which checkpoint played it and
+  search_config_hash the rollout kernel; rollout episodes never enter
+  the store; episodes admitted before the first rollout completes are
+  unlabeled (bounded burst runs that admit everything at once therefore
+  stay unlabeled)
   SelfAverage: a reward EMA of the learner's own recent episode rewards
   on that lane; adaptive, so labels do not saturate on repeated or single
   roots; unlabeled until the EMA seeds (the first in-flight admissions per

@@ -175,6 +175,59 @@ fn selfplay_run_supports_self_average_reference() {
     assert_eq!(labeled, 3);
 }
 
+#[test]
+fn selfplay_run_supports_policy_reference() {
+    let dir = TestDir::new();
+    let summary = run(SelfplayConfig {
+        replay_dir: Some(dir.path().to_path_buf()),
+        episodes: 4,
+        lanes: 1,
+        workers_per_lane: 1,
+        reference: ReferenceMode::Policy,
+        root_mode: RootMode::Fixed,
+        reference_ema_decay: 0.99,
+        seed: 11,
+        max_steps: 2,
+        simulations: 2,
+        max_considered: 16,
+        gumbel_scale: 0.5,
+        tree_reuse: false,
+        max_candidates: 255,
+        max_batch: 1,
+        evaluator: EvaluatorMode::Stub,
+        python_dir: None,
+        checkpoint_dir: None,
+        eval_device: None,
+        eval_poll_interval: None,
+        serve_socket: None,
+        serve_max_batch: 512,
+        replay_backlog: None,
+        replay_retain: None,
+    })
+    .unwrap();
+
+    // The opponent rollout is excluded from the episode counters.
+    assert_eq!(summary.episodes_appended, 4);
+    // The first admission precedes the first completed rollout and stays
+    // unlabeled; every later episode labels against the rollout scalar.
+    let labeled = summary.wins + summary.losses + summary.ties;
+    assert_eq!(labeled, 3);
+}
+
+#[test]
+fn selfplay_config_rejects_policy_reference_with_generated_roots() {
+    let error = SelfplayConfig {
+        replay_dir: Some(PathBuf::from("/tmp/unused")),
+        reference: ReferenceMode::Policy,
+        root_mode: RootMode::Generated,
+        ..SelfplayConfig::default()
+    }
+    .validate()
+    .unwrap_err();
+
+    assert!(error.contains("requires --root-mode fixed"), "{error}");
+}
+
 fn serving_config(dir: &TestDir) -> SelfplayConfig {
     SelfplayConfig {
         replay_dir: Some(dir.path().to_path_buf()),

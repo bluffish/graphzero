@@ -2,13 +2,15 @@ use gz_engine::{
     ActionSetHash, ApplyResult, CandidateHash, CandidateInfo, CandidateKindId, CandidateMetadata,
     CandidateOptions, CandidateTags, EngineId, EngineResult, EngineVersion, GraphArtifact,
     GraphArtifactFormat, GraphEngine, GraphHash, MeasureConfigHash, MeasureMetadata,
-    MeasureOptions, MeasureResult, SubjectId,
+    MeasureOptions, MeasureResult, ModelVersion, PortableGraphId, ReplayGraphContext,
+    SearchConfigHash, SubjectId,
 };
 use gz_engine_whittle::{WhittleEngine, WhittleEngineConfig};
 use gz_orchestrator::reference::{
-    BeamReferenceProvider, GreedyReferenceProvider, RandomReferenceProvider, ReferenceProvider,
-    RootBaselineProvider,
+    BeamReferenceProvider, GreedyReferenceProvider, PolicyReferenceProvider,
+    RandomReferenceProvider, ReferenceProvider, RolloutOutcome, RootBaselineProvider,
 };
+use gz_replay::ReplayReferenceKind;
 use gz_search::{
     BeamSearch, BeamSearchConfig, GreedySearch, GreedySearchConfig, RandomSearch,
     RandomSearchConfig, SearchStep,
@@ -175,6 +177,82 @@ fn unscoreable_final_measure_returns_none() {
         RootBaselineProvider::new(MeasureOptions::new(config_hash(), 1, None, true).unwrap());
 
     assert!(provider.reference(&mut engine, root).unwrap().is_none());
+}
+
+fn rollout_outcome(reward: f32) -> RolloutOutcome {
+    RolloutOutcome {
+        final_reward: reward,
+        final_graph: ReplayGraphContext::new(
+            PortableGraphId::new(
+                graph_hash(9),
+                EngineId::from_bytes([1; 16]),
+                EngineVersion::from_bytes([2; 16]),
+            ),
+            ActionSetHash::from_bytes([4; 32]),
+        ),
+        search_config_hash: SearchConfigHash::from_bytes([9; 32]),
+    }
+}
+
+#[test]
+fn policy_provider_rollout_lifecycle() {
+    let mut engine = whittle();
+    let root = engine.root();
+    let mut policy = PolicyReferenceProvider::new();
+    let provider: &mut dyn ReferenceProvider<WhittleEngine> = &mut policy;
+    let v1 = ModelVersion::from_bytes([1; 16]);
+    let v2 = ModelVersion::from_bytes([2; 16]);
+
+    // Idle and unlabeled before any model version is seen.
+    assert!(provider.reference(&mut engine, root).unwrap().is_none());
+    assert!(!provider.rollout_due(None));
+    assert!(provider.rollout_due(Some(v1)));
+
+    // One rollout in flight blocks further admissions; still unlabeled.
+    provider.begin_rollout(v1);
+    assert!(!provider.rollout_due(Some(v1)));
+    assert!(!provider.rollout_due(Some(v2)));
+    assert!(provider.reference(&mut engine, root).unwrap().is_none());
+
+    // The completed rollout becomes the reference scalar.
+    provider.finish_rollout(Some(rollout_outcome(-7.0)));
+    let reference = provider.reference(&mut engine, root).unwrap().unwrap();
+    assert_eq!(reference.kind, ReplayReferenceKind::Gumbel);
+    assert_eq!(reference.final_reward, -7.0);
+    assert_eq!(reference.model_version, Some(v1));
+    assert!(reference.final_graph.is_some());
+    assert!(reference.search_config_hash.is_some());
+
+    // Same version: no re-roll. New version: one rollout due.
+    assert!(!provider.rollout_due(Some(v1)));
+    assert!(provider.rollout_due(Some(v2)));
+}
+
+#[test]
+fn policy_provider_failed_rollout_keeps_reference_and_retries() {
+    let mut engine = whittle();
+    let root = engine.root();
+    let mut policy = PolicyReferenceProvider::new();
+    let provider: &mut dyn ReferenceProvider<WhittleEngine> = &mut policy;
+    let v1 = ModelVersion::from_bytes([1; 16]);
+    let v2 = ModelVersion::from_bytes([2; 16]);
+
+    provider.begin_rollout(v1);
+    provider.finish_rollout(Some(rollout_outcome(-7.0)));
+
+    // An unmeasured rollout keeps the old scalar and stays due.
+    provider.begin_rollout(v2);
+    provider.finish_rollout(None);
+    let reference = provider.reference(&mut engine, root).unwrap().unwrap();
+    assert_eq!(reference.model_version, Some(v1));
+    assert!(provider.rollout_due(Some(v2)));
+
+    // The retry replaces it.
+    provider.begin_rollout(v2);
+    provider.finish_rollout(Some(rollout_outcome(-3.0)));
+    let reference = provider.reference(&mut engine, root).unwrap().unwrap();
+    assert_eq!(reference.final_reward, -3.0);
+    assert_eq!(reference.model_version, Some(v2));
 }
 
 fn contexts<G>(

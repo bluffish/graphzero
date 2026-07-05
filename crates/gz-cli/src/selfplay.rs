@@ -9,8 +9,9 @@ use gz_eval_service::{
 };
 use gz_features::{FeatureExtractor, PositionFeatures};
 use gz_orchestrator::reference::{
-    BeamReferenceProvider, GreedyReferenceProvider, RandomReferenceProvider, Reference,
-    ReferenceProvider, RootBaselineProvider, SelfAverageProvider,
+    BeamReferenceProvider, GreedyReferenceProvider, PolicyReferenceProvider,
+    RandomReferenceProvider, Reference, ReferenceProvider, RolloutOutcome, RootBaselineProvider,
+    SelfAverageProvider,
 };
 use gz_orchestrator::{
     FeaturizedRuntime, ReplayBackpressure, ReplayRuntime, RootSource, ThreadedGumbelOrchestrator,
@@ -133,6 +134,9 @@ impl SelfplayConfig {
                 );
             }
         }
+        if self.reference == ReferenceMode::Policy && self.root_mode != RootMode::Fixed {
+            return Err("--reference policy requires --root-mode fixed".to_owned());
+        }
         if self.evaluator == EvaluatorMode::Torch && self.checkpoint_dir.is_none() {
             return Err("--evaluator torch requires --checkpoint-dir".to_owned());
         }
@@ -222,6 +226,7 @@ pub enum ReferenceMode {
     Beam,
     Random,
     SelfAverage,
+    Policy,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -268,6 +273,7 @@ impl FromStr for ReferenceMode {
             "beam" => Ok(Self::Beam),
             "random" => Ok(Self::Random),
             "self-average" => Ok(Self::SelfAverage),
+            "policy" => Ok(Self::Policy),
             _ => Err(format!("unknown reference: {value}")),
         }
     }
@@ -629,6 +635,7 @@ fn provider(
         ReferenceMode::SelfAverage => {
             CliReferenceProvider::SelfAverage(SelfAverageProvider::new(config.reference_ema_decay))
         }
+        ReferenceMode::Policy => CliReferenceProvider::Policy(PolicyReferenceProvider::new()),
     };
 
     Ok(provider)
@@ -803,6 +810,23 @@ impl RootSource<WhittleEngine> for CliRoots {
             }
         }
     }
+
+    /// Opponent rollouts replay the shared root without consuming the
+    /// episode budget. Generated mode has no fixed root (policy-opponent
+    /// rollouts are a fixed-root feature).
+    fn fixed_root(&mut self, engine: &mut WhittleEngine) -> EngineResult<Option<WhittleGraphId>> {
+        match self {
+            Self::Generated(_) => Ok(None),
+            Self::Fixed {
+                generator, root, ..
+            } => {
+                if root.is_none() {
+                    *root = Some(generator.sample_into(engine)?.graph);
+                }
+                Ok(*root)
+            }
+        }
+    }
 }
 
 enum CliReferenceProvider {
@@ -812,6 +836,7 @@ enum CliReferenceProvider {
     Beam(BeamReferenceProvider),
     Random(RandomReferenceProvider),
     SelfAverage(SelfAverageProvider),
+    Policy(PolicyReferenceProvider),
 }
 
 impl ReferenceProvider<WhittleEngine> for CliReferenceProvider {
@@ -827,6 +852,7 @@ impl ReferenceProvider<WhittleEngine> for CliReferenceProvider {
             Self::Beam(provider) => provider.reference(engine, root),
             Self::Random(provider) => provider.reference(engine, root),
             Self::SelfAverage(provider) => provider.reference(engine, root),
+            Self::Policy(provider) => provider.reference(engine, root),
         }
     }
 
@@ -835,10 +861,38 @@ impl ReferenceProvider<WhittleEngine> for CliReferenceProvider {
     // stateful provider variant must be forwarded here.
     fn observe(&mut self, learner_reward: f32) {
         match self {
-            Self::None | Self::Root(_) | Self::Greedy(_) | Self::Beam(_) | Self::Random(_) => {}
+            Self::None
+            | Self::Root(_)
+            | Self::Greedy(_)
+            | Self::Beam(_)
+            | Self::Random(_)
+            | Self::Policy(_) => {}
             Self::SelfAverage(provider) => {
                 ReferenceProvider::<WhittleEngine>::observe(provider, learner_reward);
             }
+        }
+    }
+
+    // The rollout hooks likewise forward explicitly: the defaults are
+    // no-ops, which would silently disable the policy opponent.
+    fn rollout_due(&self, latest: Option<gz_engine::ModelVersion>) -> bool {
+        match self {
+            Self::Policy(provider) => {
+                ReferenceProvider::<WhittleEngine>::rollout_due(provider, latest)
+            }
+            _ => false,
+        }
+    }
+
+    fn begin_rollout(&mut self, version: gz_engine::ModelVersion) {
+        if let Self::Policy(provider) = self {
+            ReferenceProvider::<WhittleEngine>::begin_rollout(provider, version);
+        }
+    }
+
+    fn finish_rollout(&mut self, outcome: Option<RolloutOutcome>) {
+        if let Self::Policy(provider) = self {
+            ReferenceProvider::<WhittleEngine>::finish_rollout(provider, outcome);
         }
     }
 }

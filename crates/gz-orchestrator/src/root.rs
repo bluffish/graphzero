@@ -2,6 +2,14 @@ use gz_engine::{EngineResult, GraphEngine};
 
 pub trait RootSource<E: GraphEngine> {
     fn next_root(&mut self, engine: &mut E) -> EngineResult<Option<E::Graph>>;
+
+    /// The single root every episode shares, for sources that have one
+    /// (fixed-root mode). Opponent rollouts replay from it without
+    /// consuming the episode budget. None for per-episode roots.
+    fn fixed_root(&mut self, engine: &mut E) -> EngineResult<Option<E::Graph>> {
+        let _ = engine;
+        Ok(None)
+    }
 }
 
 impl<E, F> RootSource<E> for F

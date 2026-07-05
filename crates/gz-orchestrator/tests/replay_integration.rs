@@ -1,14 +1,15 @@
-use gz_engine::{CandidateOptions, EngineResult, GraphEngine};
+use gz_engine::{CandidateOptions, EngineResult, GraphEngine, ModelVersion};
 use gz_engine_whittle::{WhittleEngine, WhittleEngineConfig, WhittleGraphId};
+use gz_eval::{EvalOutput, EvalRequest, EvalResult, Evaluator};
 use gz_eval::{RandomValueEvaluator, RandomValueEvaluatorConfig};
 use gz_orchestrator::reference::{
-    GreedyReferenceProvider, ReferenceProvider, RootBaselineProvider,
+    GreedyReferenceProvider, PolicyReferenceProvider, ReferenceProvider, RootBaselineProvider,
 };
 use gz_orchestrator::{
-    CountedRoots, ReplayBackpressure, ReplayRuntime, ThreadedGumbelOrchestrator,
+    CountedRoots, ReplayBackpressure, ReplayRuntime, RootSource, ThreadedGumbelOrchestrator,
     ThreadedOrchestratorConfig,
 };
-use gz_replay::{ReplayEpisodeRecord, ReplayStore, SampleConfig};
+use gz_replay::{ReplayEpisodeRecord, ReplayReferenceKind, ReplayStore, SampleConfig};
 use gz_search::{
     GreedySearch, GreedySearchConfig, GumbelEpisodeContext, GumbelMcts, GumbelMctsConfig,
 };
@@ -291,6 +292,126 @@ fn replay_records(store: &ReplayStore, count: u64) -> Vec<ReplayEpisodeRecord> {
                 .unwrap()
         })
         .collect()
+}
+
+/// The engine root as every episode's root, plus the fixed_root hook the
+/// policy opponent needs.
+struct FixedRoots {
+    remaining: u64,
+}
+
+impl RootSource<WhittleEngine> for FixedRoots {
+    fn next_root(&mut self, engine: &mut WhittleEngine) -> EngineResult<Option<WhittleGraphId>> {
+        if self.remaining == 0 {
+            return Ok(None);
+        }
+        self.remaining -= 1;
+        Ok(Some(engine.root()))
+    }
+
+    fn fixed_root(&mut self, engine: &mut WhittleEngine) -> EngineResult<Option<WhittleGraphId>> {
+        Ok(Some(engine.root()))
+    }
+}
+
+/// Wraps the random evaluator and stamps a model version that switches
+/// after a fixed number of evals -- a checkpoint hot-swap in miniature.
+struct SwitchingEvaluator {
+    inner: RandomValueEvaluator,
+    evals: u64,
+    switch_after: u64,
+}
+
+impl Evaluator for SwitchingEvaluator {
+    fn evaluate_batch(
+        &mut self,
+        requests: &[EvalRequest],
+        out: &mut Vec<EvalOutput>,
+    ) -> EvalResult<()> {
+        self.inner.evaluate_batch(requests, out)?;
+        for output in out.iter_mut() {
+            self.evals += 1;
+            output.model_version = if self.evals <= self.switch_after {
+                ModelVersion::from_bytes([1; 16])
+            } else {
+                ModelVersion::from_bytes([2; 16])
+            };
+        }
+        Ok(())
+    }
+}
+
+#[test]
+fn policy_reference_refreshes_per_model_version_and_skips_replay() {
+    let dir = TestDir::new();
+    let store = ReplayStore::open(dir.path()).unwrap();
+    let engines = engines(1);
+    let search = search(&engines[0]);
+    let episodes = 8;
+    let orchestrator = ThreadedGumbelOrchestrator::new(
+        engines,
+        SwitchingEvaluator {
+            inner: evaluator(),
+            evals: 0,
+            switch_after: 12,
+        },
+        search,
+        config(1),
+    );
+    let run = orchestrator
+        .run_with_replay(
+            vec![FixedRoots {
+                remaining: episodes,
+            }],
+            GumbelEpisodeContext::default(),
+            ReplayRuntime {
+                store: &store,
+                providers: vec![PolicyReferenceProvider::new()],
+                backpressure: None,
+            },
+        )
+        .unwrap();
+
+    // Rollout episodes never reach the store or the counters.
+    assert_eq!(run.episodes_appended, episodes);
+    assert_eq!(run.episodes_dropped, 0);
+    let records = replay_records(&store, run.episodes_appended);
+    let row_count = records
+        .iter()
+        .map(|record| record.row_count as u64)
+        .sum::<u64>();
+    assert_eq!(store.counters().produced_rows, row_count);
+
+    // The first admission precedes the first completed rollout.
+    assert!(records[0].outcome.reference.is_none());
+
+    // Labeled episodes carry the rollout scalar: kind Gumbel, versioned.
+    let references = records
+        .iter()
+        .filter_map(|record| record.outcome.reference.as_ref())
+        .collect::<Vec<_>>();
+    assert!(!references.is_empty());
+    for reference in &references {
+        assert_eq!(reference.kind, ReplayReferenceKind::Gumbel);
+        assert!(reference.model_version.is_some());
+        assert!(reference.search_config_hash.is_some());
+        assert!(reference.final_graph.is_some());
+    }
+
+    // The mid-run version switch produced a fresh rollout: both versions
+    // appear across the run's labels.
+    let mut versions = references
+        .iter()
+        .filter_map(|reference| reference.model_version)
+        .collect::<Vec<_>>();
+    versions.dedup();
+    assert_eq!(
+        versions,
+        vec![
+            ModelVersion::from_bytes([1; 16]),
+            ModelVersion::from_bytes([2; 16]),
+        ]
+    );
 }
 
 struct CountingSelfAverage {

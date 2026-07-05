@@ -17,6 +17,36 @@ pub trait ReferenceProvider<E: GraphEngine> {
     fn observe(&mut self, learner_reward: f32) {
         let _ = learner_reward;
     }
+
+    /// Rollout-driven providers (the policy opponent) answer true when
+    /// the lane should play one opponent episode from the fixed root:
+    /// `latest` is the newest model version seen on this lane's eval
+    /// replies, and a rollout is due whenever it differs from the version
+    /// the current reference was played under. Default: never.
+    fn rollout_due(&self, latest: Option<ModelVersion>) -> bool {
+        let _ = latest;
+        false
+    }
+
+    /// The lane admitted the requested rollout episode under `version`.
+    fn begin_rollout(&mut self, version: ModelVersion) {
+        let _ = version;
+    }
+
+    /// The rollout episode finished. None means it went unmeasured or
+    /// invalid; the provider keeps its previous reference and the lane
+    /// will retry while the version still differs.
+    fn finish_rollout(&mut self, outcome: Option<RolloutOutcome>) {
+        let _ = outcome;
+    }
+}
+
+/// The measured result of an opponent rollout episode.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct RolloutOutcome {
+    pub final_reward: f32,
+    pub final_graph: ReplayGraphContext,
+    pub search_config_hash: SearchConfigHash,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -275,6 +305,95 @@ where
             None => reward,
             Some(ema) => self.decay * ema + (1.0 - self.decay) * reward,
         });
+    }
+}
+
+/// The network itself as the opponent: the terminal reward of a greedy
+/// (temperature-0, one-simulation) policy rollout from the fixed root,
+/// played once per published checkpoint. The lane drives the rollout
+/// through the normal episode machinery and reports back through the
+/// rollout hooks; this provider only holds the resulting scalar.
+/// Episodes are unlabeled until the first rollout completes.
+pub struct PolicyReferenceProvider {
+    current: Option<PolicyReference>,
+    pending_version: Option<ModelVersion>,
+}
+
+struct PolicyReference {
+    reward: f32,
+    version: ModelVersion,
+    final_graph: ReplayGraphContext,
+    search_config_hash: SearchConfigHash,
+}
+
+impl PolicyReferenceProvider {
+    #[must_use]
+    pub const fn new() -> Self {
+        Self {
+            current: None,
+            pending_version: None,
+        }
+    }
+}
+
+impl Default for PolicyReferenceProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<E> ReferenceProvider<E> for PolicyReferenceProvider
+where
+    E: GraphEngine,
+{
+    fn reference(
+        &mut self,
+        _engine: &mut E,
+        _root: E::Graph,
+    ) -> EngineResult<Option<Reference<E::Graph>>> {
+        let Some(current) = &self.current else {
+            return Ok(None);
+        };
+
+        Ok(Some(Reference {
+            kind: ReplayReferenceKind::Gumbel,
+            final_reward: current.reward,
+            final_graph: Some(current.final_graph),
+            steps: Vec::new(),
+            search_config_hash: Some(current.search_config_hash),
+            model_version: Some(current.version),
+        }))
+    }
+
+    fn rollout_due(&self, latest: Option<ModelVersion>) -> bool {
+        if self.pending_version.is_some() {
+            return false;
+        }
+        match latest {
+            Some(latest) => self
+                .current
+                .as_ref()
+                .is_none_or(|current| current.version != latest),
+            None => false,
+        }
+    }
+
+    fn begin_rollout(&mut self, version: ModelVersion) {
+        self.pending_version = Some(version);
+    }
+
+    fn finish_rollout(&mut self, outcome: Option<RolloutOutcome>) {
+        let Some(version) = self.pending_version.take() else {
+            return;
+        };
+        if let Some(outcome) = outcome {
+            self.current = Some(PolicyReference {
+                reward: outcome.final_reward,
+                version,
+                final_graph: outcome.final_graph,
+                search_config_hash: outcome.search_config_hash,
+            });
+        }
     }
 }
 

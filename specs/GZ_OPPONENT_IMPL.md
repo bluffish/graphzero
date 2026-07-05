@@ -1,6 +1,6 @@
 # Opponent Configuration Implementation Spec
 
-Status: implementation work order
+Status: Stage 3 implemented (2026-07-05, simplified); Stages 1-2 open
 
 Purpose: make the opponent (reference) a first-class, parameterized
 config swap and add the missing PolicyOpponent. The provider machinery
@@ -63,6 +63,23 @@ provider wrapper); labels match the unmemoized provider bit-for-bit.
 ```
 
 ## Stage 3: PolicyOpponent (fixed-root first)
+
+Implemented, with simplifications against the text below (per review):
+plain greedy rollout only -- simulations hardwired to 1, no
+reference_rollout_sims knob (add it when a run wants shallow-search
+rollouts). Mechanics: GumbelMcts::policy_rollout() derives the
+one-simulation/one-considered/no-noise search; RootSource::fixed_root
+hands the shared root to rollouts without consuming episode budget;
+ReferenceProvider gained rollout_due/begin_rollout/finish_rollout
+hooks driven by the lane loop (OpponentRollout in lanes.rs), which
+watches model versions on eval replies, admits one rollout episode
+ahead of root admission (a busy pool cannot starve it), intercepts its
+completion before projection, and never appends or counts it.
+Labels bind at admission, so bounded runs that admit every episode
+up front (episodes <= lanes x workers) finish unlabeled; continuous
+runs label everything after the first rollout. Failed (unmeasured)
+rollouts keep the previous scalar and retry while the version still
+differs.
 
 ```text
 kind = policy: the opponent is the network itself playing the graph.

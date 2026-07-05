@@ -144,6 +144,32 @@ where
         Ok((admitted, false))
     }
 
+    /// Admits one episode outside the root source -- the opponent rollout
+    /// path. The caller supplies the root, search config, context, and
+    /// episode id. Returns false when no worker slot is idle.
+    pub(crate) fn admit_direct(
+        &mut self,
+        search: &GumbelMcts,
+        identity: EngineIdentity,
+        root: G,
+        context: gz_search::GumbelEpisodeContext,
+        episode_id: EpisodeId,
+    ) -> bool {
+        for slot in &mut self.slots {
+            if !matches!(slot.state, SlotState::Idle) {
+                continue;
+            }
+
+            slot.state = SlotState::Running(ActiveEpisode {
+                task: GumbelEpisodeTask::new(search, identity, root, context),
+                episode_id,
+            });
+            return true;
+        }
+
+        false
+    }
+
     pub(crate) fn drive<E>(
         &mut self,
         engine: &mut E,
