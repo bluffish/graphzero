@@ -2,6 +2,10 @@
 # reference = "gated-policy" -- the historical-best rollout bar
 # (strict-accept arena gate). Compare against pointer-pair-2 (ungated,
 # labels saturated +1 against the soft forced-play bar).
+#
+# -2: 32x32 workers + eval batch 128 (the validated scaling shape;
+# -1 ran 32x8/batch-32 at 0.47 eps/s with 11/48 cores and a half-idle
+# eval GPU).
 
 [arch]
 dim = 128
@@ -34,7 +38,7 @@ bootstrap_episodes = 128
 
 [selfplay]
 lanes = 32
-workers_per_lane = 8
+workers_per_lane = 32
 simulations = 48
 max_considered = 8
 gumbel_scale = 1.0
@@ -48,12 +52,12 @@ replay_retain = 150000
 eval_device = "cuda:0"
 eval_poll_interval = 2.0
 seed = 42
-max_batch = 32
+max_batch = 128
 python_dir = "python"
 
 [wandb]
 project = "graphzero"
-run_name = "whittle-1024-pub32-5k-pointer-pair-gated-1"
+run_name = "whittle-1024-pub32-5k-pointer-pair-gated-2"
 
 [paths]
 run_dir = "runs/whittle-1024-pub32-5k-pointer-pair-gated"
