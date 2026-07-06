@@ -284,21 +284,30 @@ impl ReplayStore {
         let mut rng = ReplayRng::new(config.seed);
         let row_index = self.cf(CF_ROW_INDEX)?;
         let rows = self.cf(CF_ROWS)?;
-        let mut out = Vec::with_capacity(config.batch.get());
+        let batch = config.batch.get();
 
-        for _ in 0..config.batch.get() {
-            let row_seq = start + rng.next_bounded(window);
-            let row_key = self
-                .db
-                .get_cf(&row_index, row_index_key(row_seq))?
-                .ok_or_else(|| ReplayError::storage("missing row index entry"))?;
+        // Two batched MultiGet phases instead of 2 x batch sequential
+        // point gets: index keys resolve to row keys, row keys resolve to
+        // rows. Results return in request order, so sampling stays
+        // bit-identical to the sequential loop for a given seed.
+        let index_keys = (0..batch)
+            .map(|_| row_index_key(start + rng.next_bounded(window)))
+            .collect::<Vec<_>>();
+
+        let mut row_keys = Vec::with_capacity(batch);
+        let mut episode_seqs = Vec::with_capacity(batch);
+        for result in self.db.batched_multi_get_cf(&row_index, &index_keys, false) {
+            let row_key = result?.ok_or_else(|| ReplayError::storage("missing row index entry"))?;
             let episode_seq = decode_episode_from_row_key(&row_key)
                 .ok_or_else(|| ReplayError::storage("corrupt row key"))?;
-            let row = self
-                .db
-                .get_cf(&rows, &row_key)?
-                .ok_or_else(|| ReplayError::storage("missing replay row"))?;
+            episode_seqs.push(episode_seq);
+            row_keys.push(row_key);
+        }
 
+        let mut out = Vec::with_capacity(batch);
+        let row_results = self.db.batched_multi_get_cf(&rows, row_keys.iter(), false);
+        for (episode_seq, result) in episode_seqs.into_iter().zip(row_results) {
+            let row = result?.ok_or_else(|| ReplayError::storage("missing replay row"))?;
             out.push((
                 ReplayEpisodeId::new(episode_seq),
                 postcard::from_bytes::<StoredReplayRow>(&row)?.into_row(),
