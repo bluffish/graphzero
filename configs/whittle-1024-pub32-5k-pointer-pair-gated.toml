@@ -37,8 +37,8 @@ step_sleep = 0.0
 bootstrap_episodes = 128
 
 [selfplay]
-lanes = 32
-workers_per_lane = 64
+lanes = 44
+workers_per_lane = 48
 simulations = 48
 max_considered = 8
 gumbel_scale = 1.0
