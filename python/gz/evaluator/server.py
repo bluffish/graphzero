@@ -4,6 +4,7 @@ import os
 import select
 import socket
 import struct
+from collections import deque
 from dataclasses import dataclass
 from pathlib import Path
 from threading import Event
@@ -45,6 +46,9 @@ class _ConnectionState:
     action_set_hash: ActionSetHash
 
 
+PIPELINE_DEPTH = 2
+
+
 def serve(socket_path: str | Path, backend: StubBackend, *, ready_event: Event | None = None) -> None:
     path = Path(socket_path)
     try:
@@ -68,36 +72,39 @@ def serve(socket_path: str | Path, backend: StubBackend, *, ready_event: Event |
 def _serve_connection(conn: socket.socket, backend: StubBackend) -> None:
     read_buf = bytearray()
     write_buf = bytearray()
-    # One launched-but-unfinished eval: (batch_id, backend pending handle).
-    # The pipeline order per EVAL frame is stage(new) -> finish(pending) ->
-    # write reply -> swap check -> launch(new), which overlaps this frame's
-    # read+staging with the previous batch's GPU time while preserving
-    # FIFO replies. finish must precede launch: CUDA-graph runners reuse
-    # static output buffers.
-    pending: tuple[int, object] | None = None
+    # Launched-but-unfinished evals, oldest first, at most PIPELINE_DEPTH.
+    # Per EVAL frame the order is stage(new) -> launch(new) -> queue; the
+    # oldest entry is finished and its reply written when the queue is
+    # full or the client has nothing further on the wire. Backends move
+    # outputs off CUDA-graph static buffers at launch time, so multiple
+    # launches may be outstanding; replies stay FIFO.
+    pending: deque[tuple[int, object]] = deque()
     try:
         state = _handshake(conn, read_buf, write_buf, backend)
         while True:
-            if pending is not None:
-                # Only hold the pending batch open if the next request is
-                # already on the wire; otherwise the client is blocked on
-                # this reply (read_frame never over-reads, so socket
-                # readability is the complete signal).
+            while pending:
+                # Hold replies open only while the next request is already
+                # on the wire and there is queue room to keep pipelining
+                # (read_frame never over-reads, so socket readability is
+                # the complete signal that the client is not blocked).
                 readable, _, _ = select.select([conn], [], [], 0)
-                if not readable:
-                    pending = _flush_pending(conn, write_buf, backend, pending)
+                if readable and len(pending) < PIPELINE_DEPTH:
+                    break
+                _flush_oldest(conn, write_buf, backend, pending)
             frame_type, payload = read_frame(conn, read_buf)
             try:
                 if frame_type == FRAME_PING:
-                    pending = _flush_pending(conn, write_buf, backend, pending)
+                    while pending:
+                        _flush_oldest(conn, write_buf, backend, pending)
                     _handle_ping(conn, write_buf, payload)
                 elif frame_type == FRAME_EVAL:
                     batch_id, view = _parse_eval(state, payload)
                     staged = backend.stage(view)
                     del view
-                    pending = _flush_pending(conn, write_buf, backend, pending)
+                    if len(pending) >= PIPELINE_DEPTH:
+                        _flush_oldest(conn, write_buf, backend, pending)
                     backend.apply_pending_swap()
-                    pending = (batch_id, backend.launch(staged))
+                    pending.append((batch_id, backend.launch(staged)))
                 else:
                     raise ProtocolError(ERROR_PROTOCOL, "unexpected frame type")
             finally:
@@ -157,13 +164,16 @@ def _ensure_reply_send_buffer(conn: socket.socket, backend: StubBackend, capacit
         # Schema-less backends (the stub) get best-effort sizing only.
         conn.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, 8 * 1024 * 1024)
         return
-    reply_frame = 45 + capacity * 4 + capacity * int(max_actions) * 4
+    # PIPELINE_DEPTH replies can be queued back-to-back while the client
+    # is mid-write of its next request; the send buffer must hold all of
+    # them for the reply writes to never block.
+    reply_frame = (45 + capacity * 4 + capacity * int(max_actions) * 4) * PIPELINE_DEPTH
     conn.setsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF, reply_frame)
     achieved = conn.getsockopt(socket.SOL_SOCKET, socket.SO_SNDBUF)
     if achieved < reply_frame:
         raise ProtocolError(
             ERROR_CAPACITY,
-            f"send buffer {achieved} cannot hold a reply frame ({reply_frame}); "
+            f"send buffer {achieved} cannot hold {PIPELINE_DEPTH} reply frames ({reply_frame}); "
             "raise net.core.wmem_max or lower the eval batch capacity",
         )
 
@@ -189,15 +199,13 @@ def _parse_eval(state: _ConnectionState, payload: memoryview) -> tuple[int, Batc
     return batch_id, batch
 
 
-def _flush_pending(
+def _flush_oldest(
     conn: socket.socket,
     write_buf: bytearray,
     backend: StubBackend,
-    pending: tuple[int, object] | None,
+    pending: deque[tuple[int, object]],
 ) -> None:
-    if pending is None:
-        return None
-    batch_id, handle = pending
+    batch_id, handle = pending.popleft()
     result = backend.finish(handle)
     write_frame_into(
         conn,
@@ -207,7 +215,6 @@ def _flush_pending(
         bytes(result.model_version),
         result.payload,
     )
-    return None
 
 
 def _send_error(conn: socket.socket, write_buf: bytearray, code: int, message: str) -> None:

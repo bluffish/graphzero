@@ -1799,18 +1799,26 @@ where
 {
     type Routing = Vec<(usize, usize, WorkToken, u32)>;
 
+    // Up to PIPELINE_DEPTH submitted batches ride the backend at once
+    // (the evaluator moves outputs off its static buffers at launch, so
+    // its GPU queue holds a batch while the previous one drains); replies
+    // are FIFO. Depth 2 hides the server's per-batch host work under the
+    // preceding batch's compute.
+    const PIPELINE_DEPTH: usize = 2;
+
     let mut batch_sizes = Vec::new();
     let mut batch = Vec::with_capacity(config.max_batch.get());
     let mut rows = Vec::with_capacity(config.max_batch.get());
     let mut action_counts = Vec::with_capacity(config.max_batch.get());
     let mut bytes = Vec::new();
-    let mut in_flight: Option<(Routing, gz_eval_service::PendingBatch)> = None;
+    let mut in_flight: std::collections::VecDeque<(Routing, gz_eval_service::PendingBatch)> =
+        std::collections::VecDeque::with_capacity(PIPELINE_DEPTH);
     let mut intake_open = true;
 
-    while intake_open || in_flight.is_some() {
+    while intake_open || !in_flight.is_empty() {
         batch.clear();
-        if intake_open {
-            if in_flight.is_none() {
+        if intake_open && in_flight.len() < PIPELINE_DEPTH {
+            if in_flight.is_empty() {
                 // Nothing on the backend: block for work.
                 match intake_rx.recv() {
                     Ok(job) => batch.push(job),
@@ -1842,7 +1850,7 @@ where
         }
 
         let submitted = if batch.is_empty() {
-            None
+            false
         } else {
             let mut routing: Routing = Vec::with_capacity(batch.len());
             rows.clear();
@@ -1858,10 +1866,18 @@ where
             let pending = backend
                 .submit(&bytes, &action_counts)
                 .map_err(|_| internal("feature eval backend failed"))?;
-            Some((routing, pending))
+            in_flight.push_back((routing, pending));
+            true
         };
 
-        if let Some((routing, pending)) = in_flight.take() {
+        // Drain the oldest reply when the pipeline is full, when this
+        // round collected nothing (idle lanes are waiting on replies),
+        // or when intake closed and only the tail remains.
+        let must_drain = in_flight.len() >= PIPELINE_DEPTH || (!submitted && !in_flight.is_empty());
+        if !must_drain {
+            continue;
+        }
+        if let Some((routing, pending)) = in_flight.pop_front() {
             let outputs = backend
                 .receive(pending)
                 .map_err(|_| internal("feature eval backend failed"))?;
@@ -1884,8 +1900,6 @@ where
                 });
             }
         }
-
-        in_flight = submitted;
     }
 
     Ok(batch_sizes)

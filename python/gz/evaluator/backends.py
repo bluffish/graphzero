@@ -25,12 +25,15 @@ class EvalResult:
 
 # The pipelined serving contract: stage(view) copies everything it needs
 # out of the request buffer (the view dies when the next frame is read),
-# launch(staged) enqueues compute without waiting for it, finish(pending)
-# waits and encodes. The server interleaves them as
-#   stage(N+1) -> finish(N) -> write reply(N) -> launch(N+1)
-# so the socket read and staging of N+1 overlap N's GPU time. finish(N)
-# MUST complete before launch(N+1): CUDA-graph runners reuse static
-# output buffers, and the next replay overwrites them.
+# launch(staged) enqueues compute AND the device-to-host copy of its
+# outputs (into per-slot pinned buffers, stream-ordered behind the
+# replay), finish(pending) waits on the slot's event and encodes. Because
+# outputs leave the CUDA-graph static buffers at launch time, up to
+# HOST_SLOTS launches may be outstanding before a finish -- the server
+# runs the loop at depth 2:
+#   stage(N+1) -> launch(N+1) -> ... -> finish(N) -> write reply(N)
+# finish(N) waits only on N's event, never on replay(N+1) queued behind
+# it.
 
 
 class StubBackend:
@@ -86,12 +89,25 @@ class StagedEval:
 
 
 @dataclass(frozen=True, slots=True)
+class _HostSlot:
+    values: object
+    logits: object
+    event: object
+
+
+@dataclass(frozen=True, slots=True)
 class PendingEval:
     model_version: ModelVersion
+    # CUDA path: outputs already copied to slot's pinned buffers.
+    slot: _HostSlot | None
+    # CPU path: raw tensors, finished synchronously.
     value_raw: object
     logits: object
     row_count: int
     encoder: OutputEncoder
+
+
+HOST_SLOTS = 2
 
 
 class TorchBackend:
@@ -118,6 +134,8 @@ class TorchBackend:
         self.stager: BatchStager | None = None
         self._stagers: tuple[BatchStager, ...] = ()
         self._stage_index = 0
+        self._host_slots: tuple[_HostSlot, ...] = ()
+        self._slot_index = 0
         self._encoder: OutputEncoder | None = None
         self._pending: _ServingSlot | None = None
         self._pending_lock = threading.Lock()
@@ -139,6 +157,22 @@ class TorchBackend:
             BatchStager(self._active.manifest.feature_schema, hello.batch_capacity, self.device),
         )
         self._stage_index = 0
+        if self.device.type == "cuda":
+            torch = _torch()
+            schema = self._active.manifest.feature_schema
+            self._host_slots = tuple(
+                _HostSlot(
+                    values=torch.empty(hello.batch_capacity, dtype=torch.float32, pin_memory=True),
+                    logits=torch.empty(
+                        (hello.batch_capacity, schema.max_actions),
+                        dtype=torch.float32,
+                        pin_memory=True,
+                    ),
+                    event=torch.cuda.Event(),
+                )
+                for _ in range(HOST_SLOTS)
+            )
+            self._slot_index = 0
         self._warm_runner(self._active.runner, self.stager, WARMUP_RUNS)
         if self.poll_interval > 0.0:
             self._start_loader()
@@ -203,15 +237,45 @@ class TorchBackend:
     def launch(self, staged: StagedEval) -> PendingEval:
         active = self._active
         value_raw, logits = self._run_runner(active.runner, staged.tensors)
+        if not self._host_slots:
+            return PendingEval(
+                model_version=active.model_version,
+                slot=None,
+                value_raw=value_raw,
+                logits=logits,
+                row_count=staged.row_count,
+                encoder=staged.encoder,
+            )
+        torch = _torch()
+        slot = self._host_slots[self._slot_index]
+        self._slot_index = (self._slot_index + 1) % len(self._host_slots)
+        # Enqueued on the current stream, so these read the static
+        # CUDA-graph outputs BEFORE any later replay overwrites them;
+        # the event marks when the pinned copies are complete.
+        with torch.inference_mode():
+            slot.values.copy_(torch.tanh(value_raw).float(), non_blocking=True)
+            slot.logits.copy_(logits.float(), non_blocking=True)
+        slot.event.record()
         return PendingEval(
             model_version=active.model_version,
-            value_raw=value_raw,
-            logits=logits,
+            slot=slot,
+            value_raw=None,
+            logits=None,
             row_count=staged.row_count,
             encoder=staged.encoder,
         )
 
     def finish(self, pending: PendingEval) -> EvalResult:
+        if pending.slot is not None:
+            pending.slot.event.synchronize()
+            return EvalResult(
+                model_version=pending.model_version,
+                payload=pending.encoder.encode(
+                    pending.slot.values.numpy(),
+                    pending.slot.logits.numpy(),
+                    pending.row_count,
+                ),
+            )
         torch = _torch()
         return EvalResult(
             model_version=pending.model_version,
