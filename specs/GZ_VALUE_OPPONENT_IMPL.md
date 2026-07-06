@@ -142,7 +142,22 @@ and cost trajectory -- paste both curves' summary into the review
 value_input = "pair", whittlezero's full design: the opponent
 trajectory's states embedded through the SAME trunk, paired with the
 learner state at the comparable timestep (their index rule:
-opp_state[min(t, len-1)]). For the fixed-root policy/gated-policy
+opp_state[min(t + offset, len-1)]).
+Slot semantics and symmetrization (whittle_self_play.py ValueItem
+emission): the slots are NOT randomized -- self is always the state
+whose target z is being predicted, opp is the other trajectory's
+state, and the head's contract is the asymmetric E[sgn(r_self -
+r_opp)]. What prevents slot bias is `ptp_value_perspective: both`:
+every pair also emits its MIRROR (self=opp_state, opp=self_state,
+z=-z, player ids swapped) -- deterministic both-ways augmentation
+rather than a per-sample coin flip, doubling pair data. Note this
+requires value-only samples (the mirrored rows have no policy
+target), which is why whittlezero runs SEPARATE policy and value
+replays; adopting "both" here means a value-only sample stream, a
+real architectural addition beyond the embedding plumbing. Their
+per-side player_id bits ride along as inputs for turn parity in
+alternating PTP; our fixed-root references have no turns, so they
+reduce to a self/opp indicator. For the fixed-root policy/gated-policy
 references the opponent trajectory is one rollout per model version,
 so its per-timestep embeddings can be computed ONCE per swap and
 memoized -- but they must be computed by the serving model
