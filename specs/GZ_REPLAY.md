@@ -149,6 +149,8 @@ pub enum ReplayReferenceKind {
     Beam,
     Random,
     Gumbel,
+    SelfAverage,
+    GatedPolicy,
 }
 
 pub struct ReplayRow {
@@ -215,8 +217,16 @@ reference kinds:
   on that lane; adaptive, so labels do not saturate on repeated or single
   roots; unlabeled until the EMA seeds (the first in-flight admissions per
   lane); carries no reference graph or trajectory
+  GatedPolicy: the historical-best policy opponent -- Gumbel's rollout
+  machinery behind whittlezero's arena gate: each published checkpoint
+  is challenged exactly once and accepted only if its rollout strictly
+  beats the incumbent, so the bar is monotone within a run;
+  model_version records the INCUMBENT that set the bar, not the newest
+  checkpoint
 value_target = sign(learner_reward - reference.reward): +1.0 win, -1.0
-loss, 0.0 exact tie
+loss; exact ties coin-flip to a hard +/-1 (deterministic per episode id)
+-- a zero target is a safe haven search can lock onto, and the store
+rejects it
 no reference configured, or reference measurement missing/invalid:
   value_target = None; rows are stored and remain policy-target training
   data

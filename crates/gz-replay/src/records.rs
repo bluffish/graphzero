@@ -67,6 +67,10 @@ pub enum ReplayReferenceKind {
     // the end keeps every existing store's bytes decoding unchanged. Any
     // future variant must also be appended, never inserted.
     SelfAverage,
+    /// Historical-best policy rollout: the bar is the best greedy rollout
+    /// any published checkpoint achieved this run; model_version is the
+    /// incumbent that set it.
+    GatedPolicy,
 }
 
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]

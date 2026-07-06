@@ -287,6 +287,69 @@ fn policy_provider_failed_rollout_keeps_reference_and_retries() {
     assert_eq!(reference.model_version, Some(v2));
 }
 
+#[test]
+fn gated_policy_accepts_only_strictly_better_challengers() {
+    let mut engine = whittle();
+    let root = engine.root();
+    let mut policy = PolicyReferenceProvider::gated();
+    let provider: &mut dyn ReferenceProvider<WhittleEngine> = &mut policy;
+    let v1 = ModelVersion::from_bytes([1; 16]);
+    let v2 = ModelVersion::from_bytes([2; 16]);
+    let v3 = ModelVersion::from_bytes([3; 16]);
+    let v4 = ModelVersion::from_bytes([4; 16]);
+
+    // First measured rollout seats the incumbent.
+    provider.begin_rollout(v1);
+    provider.finish_rollout(Some(rollout_outcome(-7.0)));
+    let reference = provider.reference(&mut engine, root).unwrap().unwrap();
+    assert_eq!(reference.kind, ReplayReferenceKind::GatedPolicy);
+    assert_eq!(reference.final_reward, -7.0);
+    assert_eq!(reference.model_version, Some(v1));
+
+    // A worse challenger is rejected but counts as challenged: the bar
+    // and its version attribution stay with the incumbent, no retry.
+    assert!(provider.rollout_due(Some(v2)));
+    provider.begin_rollout(v2);
+    provider.finish_rollout(Some(rollout_outcome(-9.0)));
+    let reference = provider.reference(&mut engine, root).unwrap().unwrap();
+    assert_eq!(reference.final_reward, -7.0);
+    assert_eq!(reference.model_version, Some(v1));
+    assert!(!provider.rollout_due(Some(v2)));
+
+    // An exact tie keeps the older incumbent (strict inequality).
+    provider.begin_rollout(v3);
+    provider.finish_rollout(Some(rollout_outcome(-7.0)));
+    let reference = provider.reference(&mut engine, root).unwrap().unwrap();
+    assert_eq!(reference.model_version, Some(v1));
+
+    // A strictly better challenger takes the bar; monotone increase.
+    provider.begin_rollout(v4);
+    provider.finish_rollout(Some(rollout_outcome(-5.0)));
+    let reference = provider.reference(&mut engine, root).unwrap().unwrap();
+    assert_eq!(reference.final_reward, -5.0);
+    assert_eq!(reference.model_version, Some(v4));
+}
+
+#[test]
+fn gated_policy_unmeasured_challenger_retries() {
+    let mut engine = whittle();
+    let root = engine.root();
+    let mut policy = PolicyReferenceProvider::gated();
+    let provider: &mut dyn ReferenceProvider<WhittleEngine> = &mut policy;
+    let v1 = ModelVersion::from_bytes([1; 16]);
+    let v2 = ModelVersion::from_bytes([2; 16]);
+
+    provider.begin_rollout(v1);
+    provider.finish_rollout(Some(rollout_outcome(-7.0)));
+
+    // Unmeasured: incumbent untouched, the same version stays due.
+    provider.begin_rollout(v2);
+    provider.finish_rollout(None);
+    let reference = provider.reference(&mut engine, root).unwrap().unwrap();
+    assert_eq!(reference.model_version, Some(v1));
+    assert!(provider.rollout_due(Some(v2)));
+}
+
 fn contexts(
     steps: &[gz_orchestrator::reference::ReferenceStep],
 ) -> Vec<gz_engine::ReplayGraphContext> {

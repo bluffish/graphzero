@@ -608,8 +608,23 @@ where
 /// rollout hooks; this provider only holds the resulting scalar.
 /// Episodes are unlabeled until the first rollout completes.
 pub struct PolicyReferenceProvider {
+    gate: PolicyGate,
     current: Option<PolicyReference>,
+    last_challenged: Option<ModelVersion>,
     pending_version: Option<ModelVersion>,
+}
+
+/// How a finished challenger rollout updates the reference.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum PolicyGate {
+    /// Every measured rollout replaces the reference: the bar tracks the
+    /// newest checkpoint, up or down.
+    Latest,
+    /// whittlezero's arena gate on the fixed root: a challenger is
+    /// accepted only if it strictly beats the incumbent, so the bar is
+    /// monotone and rows attribute the incumbent's version. Every
+    /// checkpoint is still challenged exactly once.
+    Best,
 }
 
 struct PolicyReference {
@@ -623,8 +638,19 @@ struct PolicyReference {
 impl PolicyReferenceProvider {
     #[must_use]
     pub const fn new() -> Self {
+        Self::with_gate(PolicyGate::Latest)
+    }
+
+    #[must_use]
+    pub const fn gated() -> Self {
+        Self::with_gate(PolicyGate::Best)
+    }
+
+    const fn with_gate(gate: PolicyGate) -> Self {
         Self {
+            gate,
             current: None,
+            last_challenged: None,
             pending_version: None,
         }
     }
@@ -646,7 +672,10 @@ where
         };
 
         Ok(Some(Reference {
-            kind: ReplayReferenceKind::Gumbel,
+            kind: match self.gate {
+                PolicyGate::Latest => ReplayReferenceKind::Gumbel,
+                PolicyGate::Best => ReplayReferenceKind::GatedPolicy,
+            },
             final_reward: current.reward,
             final_graph: Some(current.final_graph),
             steps: current.steps.clone(),
@@ -659,11 +688,12 @@ where
         if self.pending_version.is_some() {
             return false;
         }
+        // Dueness anchors on the last MEASURED challenge, not the
+        // incumbent: gated rejections must not retry, unmeasured rollouts
+        // must. Latest mode is unchanged by this anchor (it accepts every
+        // measured challenge, so last_challenged tracks current.version).
         match latest {
-            Some(latest) => self
-                .current
-                .as_ref()
-                .is_none_or(|current| current.version != latest),
+            Some(latest) => self.last_challenged != Some(latest),
             None => false,
         }
     }
@@ -676,7 +706,28 @@ where
         let Some(version) = self.pending_version.take() else {
             return;
         };
-        if let Some(outcome) = outcome {
+        // Unmeasured challengers retry: last_challenged stays put.
+        let Some(outcome) = outcome else {
+            return;
+        };
+        self.last_challenged = Some(version);
+        let accepted = match self.gate {
+            PolicyGate::Latest => true,
+            PolicyGate::Best => self
+                .current
+                .as_ref()
+                .is_none_or(|incumbent| outcome.final_reward > incumbent.reward),
+        };
+        if self.gate == PolicyGate::Best {
+            eprintln!(
+                "event=policy_gate accepted={accepted} challenger={} best={} version={version}",
+                outcome.final_reward,
+                self.current
+                    .as_ref()
+                    .map_or(outcome.final_reward, |incumbent| incumbent.reward),
+            );
+        }
+        if accepted {
             self.current = Some(PolicyReference {
                 reward: outcome.final_reward,
                 version,

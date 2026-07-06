@@ -138,8 +138,12 @@ impl SelfplayConfig {
                 );
             }
         }
-        if self.reference == ReferenceMode::Policy && self.root_mode != RootMode::Fixed {
-            return Err("--reference policy requires --root-mode fixed".to_owned());
+        if matches!(
+            self.reference,
+            ReferenceMode::Policy | ReferenceMode::GatedPolicy
+        ) && self.root_mode != RootMode::Fixed
+        {
+            return Err("--reference policy|gated-policy requires --root-mode fixed".to_owned());
         }
         if self.evaluator == EvaluatorMode::Torch && self.checkpoint_dir.is_none() {
             return Err("--evaluator torch requires --checkpoint-dir".to_owned());
@@ -231,6 +235,7 @@ pub enum ReferenceMode {
     Random,
     SelfAverage,
     Policy,
+    GatedPolicy,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -278,6 +283,7 @@ impl FromStr for ReferenceMode {
             "random" => Ok(Self::Random),
             "self-average" => Ok(Self::SelfAverage),
             "policy" => Ok(Self::Policy),
+            "gated-policy" => Ok(Self::GatedPolicy),
             _ => Err(format!("unknown reference: {value}")),
         }
     }
@@ -642,6 +648,9 @@ fn provider(
             CliReferenceProvider::SelfAverage(SelfAverageProvider::new(config.reference_ema_decay))
         }
         ReferenceMode::Policy => CliReferenceProvider::Policy(PolicyReferenceProvider::new()),
+        ReferenceMode::GatedPolicy => {
+            CliReferenceProvider::Policy(PolicyReferenceProvider::gated())
+        }
     };
 
     Ok(provider)
