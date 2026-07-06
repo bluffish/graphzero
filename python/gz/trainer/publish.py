@@ -17,13 +17,25 @@ class EmaWeights:
         self.shadow = {name: tensor.detach().clone() for name, tensor in model.state_dict().items()}
 
     def update(self, model: object) -> None:
+        import torch
+
+        # Fused multi-tensor update: the per-tensor loop launched two tiny
+        # kernels per parameter every step and was the trainer's single
+        # largest line (~19% of step wall). _foreach_ batches the same
+        # mul/add arithmetic into a handful of launches, bit-identically.
+        float_shadows = []
+        float_lives = []
         for name, tensor in model.state_dict().items():
             live = tensor.detach()
             shadow = self.shadow[name]
             if live.is_floating_point():
-                shadow.mul_(self.decay).add_(live, alpha=1.0 - self.decay)
+                float_shadows.append(shadow)
+                float_lives.append(live)
             else:
                 shadow.copy_(live)
+        if float_shadows:
+            torch._foreach_mul_(float_shadows, self.decay)
+            torch._foreach_add_(float_shadows, float_lives, alpha=1.0 - self.decay)
 
     def state_dict(self) -> dict[str, object]:
         return {name: tensor.detach().clone() for name, tensor in self.shadow.items()}
