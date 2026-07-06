@@ -15,6 +15,7 @@ fn schema_config() -> FeatureSchemaConfig {
         max_edges: 6,
         max_actions: 5,
         max_subjects: 3,
+        opponent_reward_scale: 256.0,
         expander_degree: 0,
         expander_seed: 0,
     }
@@ -106,6 +107,7 @@ fn schema_config_codec_roundtrips_and_validates() {
     invalid_bytes.extend_from_slice(&invalid.max_edges.to_le_bytes());
     invalid_bytes.extend_from_slice(&invalid.max_actions.to_le_bytes());
     invalid_bytes.extend_from_slice(&invalid.max_subjects.to_le_bytes());
+    invalid_bytes.extend_from_slice(&invalid.opponent_reward_scale.to_le_bytes());
     invalid_bytes.push(invalid.expander_degree);
     invalid_bytes.extend_from_slice(&invalid.expander_seed.to_le_bytes());
 

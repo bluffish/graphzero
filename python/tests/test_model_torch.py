@@ -116,6 +116,39 @@ def test_expander_fixture_flows_through_model(aggregation: str) -> None:
     assert view.edge_type[0, : view.edge_count[0]].tolist().count(2) == 3
 
 
+def test_scalar_value_head_uses_opponent_features() -> None:
+    view = BatchView.parse(make_batch(attr_dim=1))
+    changed_bytes = bytearray(make_batch(attr_dim=1))
+    layout = _layout(2, 3, 2, 3, 2, 1)
+    changed_bytes[layout["opponent_present"]] = 0
+    changed_bytes[layout["opponent_present"] + 1] = 0
+    changed = BatchView.parse(changed_bytes)
+    schema = schema_for_view(view, node_vocab_size=7, edge_type_count=2, action_kind_vocab_size=8)
+    arch = ArchConfig(
+        dim=16,
+        layers=1,
+        heads=4,
+        ffn_dim=32,
+        dropout=0.0,
+        aggregation="attention",
+        value_input="scalar",
+    )
+    model = build_model(schema, arch).eval()
+    with torch.no_grad():
+        for param in model.value.parameters():
+            param.zero_()
+        model.value[0].weight[0, arch.dim + 1] = 1.0
+        model.value[3].weight[0, 0] = 1.0
+
+    values, logits = run_model(model, schema, view)
+    changed_values, changed_logits = run_model(model, schema, changed)
+
+    assert values.shape == (2,)
+    assert logits.shape == (2, 3)
+    torch.testing.assert_close(changed_logits, logits, rtol=0, atol=0)
+    assert not torch.equal(changed_values, values)
+
+
 def run_model(model: object, schema: FeatureSchemaConfig, view: BatchView):
     stager = BatchStager(schema, view.batch_capacity, "cpu")
     return model(stager.copy(view))

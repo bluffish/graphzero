@@ -151,6 +151,7 @@ pub fn feature_schema_config() -> FeatureSchemaConfig {
         max_edges: 4,
         max_actions: 4,
         max_subjects: 3,
+        opponent_reward_scale: 256.0,
         expander_degree: 0,
         expander_seed: 0,
     }
@@ -173,6 +174,8 @@ pub fn feature_row_bytes(step_index: u32, action_count: usize) -> Vec<u8> {
             leaf_depth: 0,
             budget_fraction: 1.0,
             budget_step: 0.5,
+            opponent_reward: 0.0,
+            opponent_present: false,
         },
     };
     for index in 0..action_count.saturating_sub(1) {

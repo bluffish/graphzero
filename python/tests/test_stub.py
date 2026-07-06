@@ -8,6 +8,7 @@ from gz.codec import BatchView
 from gz.common import FeatureSchemaHash
 from gz.model import build
 from gz.model.stub import STUB_MODEL_VERSION, stub
+from gz.proto.frames import BATCH_ENCODING_VERSION
 from python.tests.test_codec import make_batch
 
 
@@ -87,6 +88,8 @@ def count_batch(node_counts: list[int], action_counts: list[int], row_count: int
         capacity * max_actions,
         capacity * max_actions * max_subjects * 2,
         capacity * 8,
+        capacity * 2,
+        capacity,
     ]:
         total_len = (total_len + 3) & ~3
         sections.append(total_len)
@@ -99,7 +102,7 @@ def count_batch(node_counts: list[int], action_counts: list[int], row_count: int
         out,
         0,
         b"GZFB",
-        2,
+        BATCH_ENCODING_VERSION,
         bytes(FeatureSchemaHash.from_bytes(b"r" * 32)),
         capacity,
         row_count,

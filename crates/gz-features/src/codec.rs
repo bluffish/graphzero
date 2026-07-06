@@ -102,6 +102,8 @@ pub fn encode_feature_row(
     write_u32(out, row.position.leaf_depth);
     write_bf16(out, row.position.budget_fraction);
     write_bf16(out, row.position.budget_step);
+    write_bf16(out, row.position.opponent_reward);
+    out.push(u8::from(row.position.opponent_present));
     Ok(())
 }
 
@@ -170,9 +172,19 @@ pub fn decode_feature_row(bytes: &[u8]) -> FeatureResult<FeatureRow> {
         leaf_depth: reader.u32()?,
         budget_fraction: reader.bf16()?,
         budget_step: reader.bf16()?,
+        opponent_reward: reader.bf16()?,
+        opponent_present: reader.u8()? != 0,
     };
-    if !position.budget_fraction.is_finite() || !position.budget_step.is_finite() {
+    if !position.budget_fraction.is_finite()
+        || !position.budget_step.is_finite()
+        || !position.opponent_reward.is_finite()
+    {
         return Err(FeatureError::InvalidEncoding("non-finite position feature"));
+    }
+    if !position.opponent_present && position.opponent_reward != 0.0 {
+        return Err(FeatureError::InvalidEncoding(
+            "absent opponent must have zero reward",
+        ));
     }
     if !reader.is_empty() {
         return Err(FeatureError::InvalidEncoding("trailing row bytes"));
@@ -221,6 +233,7 @@ pub fn encode_feature_schema_config(
     write_u32(out, config.max_edges);
     write_u32(out, config.max_actions);
     write_u32(out, config.max_subjects);
+    write_f32(out, config.opponent_reward_scale);
     out.push(config.expander_degree);
     write_u64(out, config.expander_seed);
     Ok(())
@@ -243,6 +256,7 @@ pub fn decode_feature_schema_config(bytes: &[u8]) -> FeatureResult<FeatureSchema
         max_edges: reader.u32()?,
         max_actions: reader.u32()?,
         max_subjects: reader.u32()?,
+        opponent_reward_scale: reader.f32()?,
         expander_degree: reader.u8()?,
         expander_seed: reader.u64()?,
     };
@@ -441,6 +455,13 @@ impl<'a> Reader<'a> {
         ))
     }
 
+    fn f32(&mut self) -> FeatureResult<f32> {
+        let bytes = self.take(4, "f32 truncated")?;
+        Ok(f32::from_le_bytes(
+            bytes.try_into().expect("length checked"),
+        ))
+    }
+
     fn bf16(&mut self) -> FeatureResult<f32> {
         let bytes = self.take(2, "bf16 truncated")?;
         Ok(bf16_bits_to_f32(u16::from_le_bytes(
@@ -521,6 +542,10 @@ fn write_u32(out: &mut Vec<u8>, value: u32) {
 }
 
 fn write_u64(out: &mut Vec<u8>, value: u64) {
+    out.extend_from_slice(&value.to_le_bytes());
+}
+
+fn write_f32(out: &mut Vec<u8>, value: f32) {
     out.extend_from_slice(&value.to_le_bytes());
 }
 

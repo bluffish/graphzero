@@ -8,7 +8,7 @@ use gz_features::{
     FeatureExtractor, FeatureResult, FeatureRow, FeatureSchema, FeatureSchemaConfig,
     PositionFeatures, decode_feature_row,
 };
-use gz_orchestrator::reference::RootBaselineProvider;
+use gz_orchestrator::reference::{RootBaselineProvider, SelfAverageProvider};
 use gz_orchestrator::{
     CountedRoots, FeaturizedRuntime, ReplayRuntime, ThreadedGumbelOrchestrator,
     ThreadedOrchestratorConfig,
@@ -145,7 +145,10 @@ fn featurized_replay_appends_rows() {
     assert_eq!(run.episodes_dropped, 0);
     assert_eq!(run.episodes_appended, 4);
     assert!(store.counters().produced_rows > 0);
-    assert_eq!(store.feature_schema().unwrap(), Some(feature_config));
+    assert_eq!(
+        store.feature_schema().unwrap(),
+        Some(feature_config.clone())
+    );
 
     let sample = store
         .sample_rows(SampleConfig {
@@ -154,9 +157,57 @@ fn featurized_replay_appends_rows() {
             seed: 0,
         })
         .unwrap();
-    for (_, row) in sample {
+    for (episode_id, row) in sample {
+        let record = store.episode(episode_id).unwrap().unwrap();
+        let reference = record.outcome.reference.as_ref().unwrap();
         let feature_row = decode_feature_row(row.feature_row.as_ref().unwrap()).unwrap();
         assert_eq!(feature_row.actions.len(), row.legal_actions.len());
+        assert!(feature_row.position.opponent_present);
+        assert_eq!(
+            feature_row.position.opponent_reward,
+            reference.reward / feature_config.opponent_reward_scale
+        );
+    }
+}
+
+#[test]
+fn featurized_replay_unlabeled_rows_have_no_opponent_scalar() {
+    let dir = TestDir::new();
+    let store = ReplayStore::open(dir.path()).unwrap();
+    let engines = engines(1);
+    let search = search(&engines[0]);
+    let extractors = extractors(&engines);
+    let orchestrator = ThreadedGumbelOrchestrator::new(engines, evaluator(), search, config(1));
+    let run = orchestrator
+        .run_featurized_with_replay(
+            vec![roots(1)],
+            GumbelEpisodeContext::default(),
+            FeaturizedRuntime {
+                extractors,
+                backend: StubBackend,
+            },
+            ReplayRuntime {
+                store: &store,
+                providers: vec![SelfAverageProvider::new(0.9)],
+                backpressure: None,
+            },
+        )
+        .unwrap();
+
+    assert_eq!(run.episodes_appended, 1);
+    let sample = store
+        .sample_rows(SampleConfig {
+            batch: NonZeroUsize::new(store.counters().produced_rows as usize).unwrap(),
+            window_rows: std::num::NonZeroU64::new(store.counters().produced_rows).unwrap(),
+            seed: 0,
+        })
+        .unwrap();
+    for (episode_id, row) in sample {
+        let record = store.episode(episode_id).unwrap().unwrap();
+        let feature_row = decode_feature_row(row.feature_row.as_ref().unwrap()).unwrap();
+        assert!(record.outcome.reference.is_none());
+        assert!(!feature_row.position.opponent_present);
+        assert_eq!(feature_row.position.opponent_reward, 0.0);
     }
 }
 

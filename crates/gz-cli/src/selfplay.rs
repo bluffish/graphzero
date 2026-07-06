@@ -671,6 +671,8 @@ fn probe_fixed_root(store: &ReplayStore, config: &SelfplayConfig) -> Result<(), 
                 leaf_depth: 0,
                 budget_fraction: 1.0,
                 budget_step: 0.0,
+                opponent_reward: 0.0,
+                opponent_present: false,
             },
         )
         .map_err(|e| format!("root feature probe failed: {e:?}"))?;

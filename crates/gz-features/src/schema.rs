@@ -4,16 +4,15 @@ use std::fmt;
 use std::str::FromStr;
 
 /// Row/targets encoding version: rows persist in replay stores, so this
-/// only moves with a store schema bump. v2 = bf16 floats, u16 indexes,
-/// u8 subject counts in stored feature rows.
-pub const ENCODING_VERSION: u32 = 2;
-/// Eval-wire batch/output encoding version. v2: f32 sections travel as
-/// bf16 and node-index/kind sections as u16 -- transient wire bytes
-/// only, never persisted, so it moves independently of the row version.
-pub const BATCH_ENCODING_VERSION: u32 = 2;
+/// only moves with a store schema bump. v3 = v2 plus opponent scalar
+/// feature sections.
+pub const ENCODING_VERSION: u32 = 3;
+/// Eval-wire batch/output encoding version. v3 = v2 plus opponent
+/// scalar feature sections.
+pub const BATCH_ENCODING_VERSION: u32 = 3;
 pub const STOP_ACTION_KIND_TOKEN: u32 = 1;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct FeatureSchemaConfig {
     pub name: String,
     pub node_vocab_size: u16,
@@ -24,11 +23,12 @@ pub struct FeatureSchemaConfig {
     pub max_edges: u32,
     pub max_actions: u32,
     pub max_subjects: u32,
+    pub opponent_reward_scale: f32,
     pub expander_degree: u8,
     pub expander_seed: u64,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 pub struct FeatureSchema {
     config: FeatureSchemaConfig,
     hash: FeatureSchemaHash,
@@ -86,6 +86,7 @@ impl FeatureSchemaHash {
         update_u32(&mut hasher, config.max_edges);
         update_u32(&mut hasher, config.max_actions);
         update_u32(&mut hasher, config.max_subjects);
+        update_u32(&mut hasher, config.opponent_reward_scale.to_bits());
         update_u8(&mut hasher, config.expander_degree);
         update_u64(&mut hasher, config.expander_seed);
         Self(*hasher.finalize().as_bytes())
@@ -138,6 +139,11 @@ fn validate_config(config: &FeatureSchemaConfig) -> FeatureResult<()> {
     }
     if config.max_subjects == 0 {
         return Err(FeatureError::InvalidSchema("max_subjects must be positive"));
+    }
+    if !config.opponent_reward_scale.is_finite() || config.opponent_reward_scale <= 0.0 {
+        return Err(FeatureError::InvalidSchema(
+            "opponent_reward_scale must be finite and positive",
+        ));
     }
     if config.expander_degree > 0 {
         if config.edge_type_count == 0 {

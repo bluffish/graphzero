@@ -402,7 +402,7 @@ impl ReplayStore {
     }
 }
 
-#[derive(Clone, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 struct StoredFeatureSchemaConfig {
     name: String,
     node_vocab_size: u16,
@@ -413,6 +413,7 @@ struct StoredFeatureSchemaConfig {
     max_edges: u32,
     max_actions: u32,
     max_subjects: u32,
+    opponent_reward_scale: f32,
     expander_degree: u8,
     expander_seed: u64,
 }
@@ -429,6 +430,7 @@ impl From<&FeatureSchemaConfig> for StoredFeatureSchemaConfig {
             max_edges: config.max_edges,
             max_actions: config.max_actions,
             max_subjects: config.max_subjects,
+            opponent_reward_scale: config.opponent_reward_scale,
             expander_degree: config.expander_degree,
             expander_seed: config.expander_seed,
         }
@@ -447,6 +449,7 @@ impl From<StoredFeatureSchemaConfig> for FeatureSchemaConfig {
             max_edges: config.max_edges,
             max_actions: config.max_actions,
             max_subjects: config.max_subjects,
+            opponent_reward_scale: config.opponent_reward_scale,
             expander_degree: config.expander_degree,
             expander_seed: config.expander_seed,
         }

@@ -7,7 +7,7 @@ use gz_features::{
 use std::num::NonZeroUsize;
 
 const HAND_BUILT_BATCH_FINGERPRINT: &str =
-    "f18c084059db6051d0b59d24f8c0118c346ecf8eeab8eb3b0fd1e0ec241142a8";
+    "9ccea8576a120381ba540bb8f5b250fb758997c0807007d9912ddef870617de0";
 
 fn schema() -> FeatureSchema {
     FeatureSchema::new(FeatureSchemaConfig {
@@ -20,6 +20,7 @@ fn schema() -> FeatureSchema {
         max_edges: 4,
         max_actions: 4,
         max_subjects: 3,
+        opponent_reward_scale: 256.0,
         expander_degree: 0,
         expander_seed: 0,
     })
@@ -60,6 +61,8 @@ fn row() -> FeatureRow {
             leaf_depth: 3,
             budget_fraction: 0.75,
             budget_step: 0.125,
+            opponent_reward: 0.5,
+            opponent_present: true,
         },
     }
 }
@@ -115,6 +118,8 @@ fn collate_parse_roundtrips_sections_and_padding() {
     assert_eq!(view.subject_count[0..4], [2, 0, 0, 0]);
     assert_eq!(view.action_subjects[0..3], [1, 2, u32::from(u16::MAX)]);
     assert_eq!(view.position[0], [2.0, 3.0, 0.75, 0.125]);
+    assert_eq!(view.opponent_reward, vec![0.5, 0.0]);
+    assert_eq!(view.opponent_present, vec![1, 0]);
 }
 
 #[test]
@@ -209,6 +214,8 @@ fn feature_row_codec_has_stable_layout() {
     expected.extend_from_slice(&3u32.to_le_bytes());
     expected.extend_from_slice(&bf16(0.75).to_le_bytes());
     expected.extend_from_slice(&bf16(0.125).to_le_bytes());
+    expected.extend_from_slice(&bf16(0.5).to_le_bytes());
+    expected.push(1);
 
     assert_eq!(bytes, expected);
 }
@@ -241,7 +248,7 @@ fn training_targets_codec_writes_padded_sections() {
     assert_eq!(view.reward, vec![0.25, -0.5]);
     assert_eq!(
         fingerprint(&bytes),
-        "89a55b18a695aa14b0a914db502d0ab1198c5e04eac01241e00e72f26ad1498d"
+        "618b58f8d534fe00f1b36c449d800dba7e83b6adf45c243f4eafc02ac030e77c"
     );
 }
 

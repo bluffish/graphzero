@@ -12,7 +12,7 @@ sys.path.insert(0, str(PYTHON_ROOT))
 
 from gz.codec import BatchView, OutputEncoder  # noqa: E402
 from gz.model.stub import stub  # noqa: E402
-from gz.proto.frames import ENCODING_VERSION  # noqa: E402
+from gz.proto.frames import BATCH_ENCODING_VERSION  # noqa: E402
 
 NODES = 32
 EDGES = 64
@@ -57,7 +57,7 @@ def make_batch(capacity: int) -> bytes:
         out,
         0,
         b"GZFB",
-        ENCODING_VERSION,
+        BATCH_ENCODING_VERSION,
         SCHEMA_HASH,
         capacity,
         capacity,
@@ -71,38 +71,43 @@ def make_batch(capacity: int) -> bytes:
     _array(out, layout["node_count"], "<u4", (capacity,)).fill(NODES)
     tokens = _array(out, layout["node_tokens"], "<u2", (capacity, NODES))
     tokens[:] = (np.arange(NODES, dtype=np.uint16) % 31) + 1
-    attrs = _array(out, layout["node_attrs"], "<f4", (capacity, NODES, ATTR_DIM))
-    attrs[:, :, 0] = np.linspace(-1.0, 1.0, NODES, dtype=np.float32)
+    _bf16(out, layout["node_attrs"], np.tile(np.linspace(-1.0, 1.0, NODES, dtype=np.float32), capacity))
 
     _array(out, layout["edge_count"], "<u4", (capacity,)).fill(EDGES)
-    edge_src = _array(out, layout["edge_src"], "<u4", (capacity, EDGES))
-    edge_dst = _array(out, layout["edge_dst"], "<u4", (capacity, EDGES))
+    edge_src = _array(out, layout["edge_src"], "<u2", (capacity, EDGES))
+    edge_dst = _array(out, layout["edge_dst"], "<u2", (capacity, EDGES))
     edge_type = _array(out, layout["edge_type"], "u1", (capacity, EDGES))
-    edge_src[:] = np.arange(EDGES, dtype=np.uint32) % NODES
-    edge_dst[:] = (np.arange(EDGES, dtype=np.uint32) + 1) % NODES
+    edge_src[:] = np.arange(EDGES, dtype=np.uint16) % NODES
+    edge_dst[:] = (np.arange(EDGES, dtype=np.uint16) + 1) % NODES
     edge_type[:] = np.arange(EDGES, dtype=np.uint8) % 2
 
     _array(out, layout["action_count"], "<u4", (capacity,)).fill(ACTIONS)
-    action_kind = _array(out, layout["action_kind"], "<u4", (capacity, ACTIONS))
-    action_kind[:] = (np.arange(ACTIONS, dtype=np.uint32) % 10) + 2
+    action_kind = _array(out, layout["action_kind"], "<u2", (capacity, ACTIONS))
+    action_kind[:] = (np.arange(ACTIONS, dtype=np.uint16) % 10) + 2
     action_kind[:, -1] = 1
-    action_prior = _array(out, layout["action_prior"], "<f4", (capacity, ACTIONS))
-    action_prior[:] = np.linspace(-1.0, 1.0, ACTIONS, dtype=np.float32)
-    action_prior[:, -1] = 0.0
+    priors = np.tile(np.linspace(-1.0, 1.0, ACTIONS, dtype=np.float32), capacity)
+    priors.reshape(capacity, ACTIONS)[:, -1] = 0.0
+    _bf16(out, layout["action_prior"], priors)
     subject_count = _array(out, layout["subject_count"], "u1", (capacity, ACTIONS))
     subject_count.fill(1)
     subject_count[:, -1] = 0
-    subjects = _array(out, layout["action_subjects"], "<u4", (capacity, ACTIONS, SUBJECTS))
-    subjects.fill(0xFFFFFFFF)
-    subjects[:, :, 0] = np.arange(ACTIONS, dtype=np.uint32) % NODES
-    subjects[:, -1, :] = 0xFFFFFFFF
-    position = _array(out, layout["position"], "<f4", (capacity, 4))
-    position[:, :] = [0.0, 0.0, 1.0, 0.125]
+    subjects = _array(out, layout["action_subjects"], "<u2", (capacity, ACTIONS, SUBJECTS))
+    subjects.fill(0xFFFF)
+    subjects[:, :, 0] = np.arange(ACTIONS, dtype=np.uint16) % NODES
+    subjects[:, -1, :] = 0xFFFF
+    _bf16(out, layout["position"], np.tile(np.array([0.0, 0.0, 1.0, 0.125], dtype=np.float32), capacity))
+    _bf16(out, layout["opponent_reward"], np.zeros(capacity, dtype=np.float32))
     return bytes(out)
 
 
 def _array(out: bytearray, offset: int, dtype: str, shape: tuple[int, ...]) -> np.ndarray:
     return np.frombuffer(out, dtype=np.dtype(dtype), count=int(np.prod(shape)), offset=offset).reshape(shape)
+
+
+def _bf16(out: bytearray, offset: int, values: np.ndarray) -> None:
+    raw = values.astype("<f4", copy=False).view("<u4")
+    bits = (((raw + np.uint32(0x7FFF) + ((raw >> np.uint32(16)) & np.uint32(1))) >> np.uint32(16)) & np.uint32(0xFFFF)).astype("<u2")
+    _array(out, offset, "<u2", (len(bits),))[:] = bits
 
 
 def _layout(capacity: int) -> dict[str, int]:
@@ -111,17 +116,19 @@ def _layout(capacity: int) -> dict[str, int]:
     for name, size in [
         ("node_count", capacity * 4),
         ("node_tokens", capacity * NODES * 2),
-        ("node_attrs", capacity * NODES * ATTR_DIM * 4),
+        ("node_attrs", capacity * NODES * ATTR_DIM * 2),
         ("edge_count", capacity * 4),
-        ("edge_src", capacity * EDGES * 4),
-        ("edge_dst", capacity * EDGES * 4),
+        ("edge_src", capacity * EDGES * 2),
+        ("edge_dst", capacity * EDGES * 2),
         ("edge_type", capacity * EDGES),
         ("action_count", capacity * 4),
-        ("action_kind", capacity * ACTIONS * 4),
-        ("action_prior", capacity * ACTIONS * 4),
+        ("action_kind", capacity * ACTIONS * 2),
+        ("action_prior", capacity * ACTIONS * 2),
         ("subject_count", capacity * ACTIONS),
-        ("action_subjects", capacity * ACTIONS * SUBJECTS * 4),
-        ("position", capacity * 16),
+        ("action_subjects", capacity * ACTIONS * SUBJECTS * 2),
+        ("position", capacity * 8),
+        ("opponent_reward", capacity * 2),
+        ("opponent_present", capacity),
     ]:
         cursor = _align4(cursor)
         out[name] = cursor

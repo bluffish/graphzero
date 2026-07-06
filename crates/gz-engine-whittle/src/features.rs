@@ -10,6 +10,7 @@ const WHITTLE_MAX_ACTIONS: u32 = 256;
 const WHITTLE_MAX_SUBJECTS: u32 = 8;
 const WHITTLE_ENGINE_EDGE_TYPES: u8 = 2;
 const DEFAULT_EXPANDER_DEGREE: u8 = 5;
+const DEFAULT_OPPONENT_REWARD_SCALE: f32 = 256.0;
 
 #[derive(Clone, Debug)]
 pub struct WhittleFeatureExtractor {
@@ -64,6 +65,7 @@ impl WhittleFeatureExtractor {
             max_edges: capacity * 2 + u32::from(config.expander_degree) * capacity,
             max_actions: config.max_actions,
             max_subjects: WHITTLE_MAX_SUBJECTS,
+            opponent_reward_scale: DEFAULT_OPPONENT_REWARD_SCALE,
             expander_degree: config.expander_degree,
             expander_seed: config.expander_seed,
         })

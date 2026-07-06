@@ -92,8 +92,16 @@ impl FeatureRow {
                 return Err(FeatureError::InvalidRow("last action must be STOP"));
             }
         }
-        if !self.position.budget_fraction.is_finite() || !self.position.budget_step.is_finite() {
+        if !self.position.budget_fraction.is_finite()
+            || !self.position.budget_step.is_finite()
+            || !self.position.opponent_reward.is_finite()
+        {
             return Err(FeatureError::InvalidRow("non-finite position feature"));
+        }
+        if !self.position.opponent_present && self.position.opponent_reward != 0.0 {
+            return Err(FeatureError::InvalidRow(
+                "absent opponent must have zero reward",
+            ));
         }
         Ok(())
     }
@@ -119,4 +127,6 @@ pub struct PositionFeatures {
     pub leaf_depth: u32,
     pub budget_fraction: f32,
     pub budget_step: f32,
+    pub opponent_reward: f32,
+    pub opponent_present: bool,
 }

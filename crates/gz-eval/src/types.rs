@@ -131,10 +131,11 @@ impl Default for EvalPositionContext {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct EvalOpponentContext {
     pub trajectory_id: u64,
     pub row_count: u32,
+    pub final_reward: f32,
 }
 
 #[derive(Clone, Debug, PartialEq)]

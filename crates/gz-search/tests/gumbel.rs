@@ -310,6 +310,7 @@ fn opponent_context_uses_same_index_alignment_and_stop_terminal_row() {
                 opponent: Some(GumbelOpponentContext {
                     trajectory_id: 9,
                     row_count: 4,
+                    final_reward: -2.0,
                 }),
                 ..GumbelSearchContext::default()
             },

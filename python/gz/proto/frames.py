@@ -6,12 +6,11 @@ import struct
 from gz.proto.errors import ERROR_MALFORMED, ERROR_PROTOCOL, ProtocolError
 
 PROTOCOL_VERSION = 1
-# Row/targets encoding version: pairs with the Rust row codec (v2 = bf16
-# floats, u16 indexes in stored feature rows).
-ENCODING_VERSION = 2
-# Eval-wire batch/output encoding version. v2 = bf16 floats, u16 indexes
-# on the wire; transient bytes only, moves independently of the rows.
-BATCH_ENCODING_VERSION = 2
+# Row/targets encoding version: pairs with the Rust row codec.
+ENCODING_VERSION = 3
+# Eval-wire batch/output encoding version. Transient bytes only, moves
+# independently of the rows.
+BATCH_ENCODING_VERSION = 3
 MAX_FRAME = 256 * 1024 * 1024
 
 FRAME_HELLO = 1

@@ -10,9 +10,9 @@ use std::num::NonZeroUsize;
 
 const NO_NODE: u32 = u32::MAX;
 const AND_IDEMPOTENT_ROW_FINGERPRINT: &str =
-    "fecd61be5733ec3b9b401e8c456b4f7d6b6d301373f3ae760f53685021c823ff";
+    "c897c847eefd3ec8557022312f7bc162f651d1e77ca474159d6e7a8b4115f139";
 const AND_IDEMPOTENT_BATCH_FINGERPRINT: &str =
-    "ee5be54fc7a3fbd6da6d780a7f5bea311301dadb9774cec1ce42b1e5c91fd7cb";
+    "be26d64b1b90db0b78683fc0dc5da0a52f018515e42d51d3626026cf170142ea";
 
 fn and_idempotent_artifact() -> Vec<u8> {
     wav1(1, 16, 2, &[(0, 0, NO_NODE), (2, 0, 0), (5, 1, NO_NODE)])
@@ -76,6 +76,8 @@ fn whittle_extractor_maps_graph_and_actions() {
                 leaf_depth: 2,
                 budget_fraction: 0.5,
                 budget_step: 0.01,
+                opponent_reward: 0.0,
+                opponent_present: false,
             },
         )
         .unwrap();
@@ -213,6 +215,8 @@ fn feature_row(
                 leaf_depth: 0,
                 budget_fraction: 1.0,
                 budget_step: 1.0,
+                opponent_reward: 0.0,
+                opponent_present: false,
             },
         )
         .unwrap()
@@ -268,6 +272,8 @@ fn row_fingerprint(row: &FeatureRow) -> String {
     update_u32(&mut hasher, row.position.leaf_depth);
     update_f32(&mut hasher, row.position.budget_fraction);
     update_f32(&mut hasher, row.position.budget_step);
+    update_f32(&mut hasher, row.position.opponent_reward);
+    hasher.update(&[u8::from(row.position.opponent_present)]);
     hasher.finalize().to_hex().to_string()
 }
 

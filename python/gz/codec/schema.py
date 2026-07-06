@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import struct
 from dataclasses import dataclass
+from math import isfinite
 
 from gz.common.tags import FeatureSchemaHash
 
@@ -21,8 +22,9 @@ class FeatureSchemaConfig:
     max_edges: int
     max_actions: int
     max_subjects: int
-    expander_degree: int
-    expander_seed: int
+    opponent_reward_scale: float = 256.0
+    expander_degree: int = 0
+    expander_seed: int = 0
 
     def __post_init__(self) -> None:
         _validate_schema_config(self)
@@ -35,7 +37,7 @@ class FeatureSchemaConfig:
             struct.pack("<H", len(name))
             + name
             + struct.pack(
-                "<HHBIIIIIBQ",
+                "<HHBIIIIIfBQ",
                 self.node_vocab_size,
                 self.node_attr_dim,
                 self.edge_type_count,
@@ -44,6 +46,7 @@ class FeatureSchemaConfig:
                 self.max_edges,
                 self.max_actions,
                 self.max_subjects,
+                self.opponent_reward_scale,
                 self.expander_degree,
                 self.expander_seed,
             )
@@ -60,6 +63,7 @@ class FeatureSchemaConfig:
             "max_edges": self.max_edges,
             "max_actions": self.max_actions,
             "max_subjects": self.max_subjects,
+            "opponent_reward_scale": self.opponent_reward_scale,
             "expander_degree": self.expander_degree,
             "expander_seed": self.expander_seed,
         }
@@ -78,10 +82,13 @@ class FeatureSchemaConfig:
             "max_edges",
             "max_actions",
             "max_subjects",
+            "opponent_reward_scale",
             "expander_degree",
             "expander_seed",
         }
-        if set(value) != fields:
+        optional = {"opponent_reward_scale"}
+        keys = set(value)
+        if keys != fields and keys != fields - optional:
             raise SchemaConfigError("feature_schema fields mismatch")
         return cls(
             name=_str_field(value, "name"),
@@ -93,6 +100,7 @@ class FeatureSchemaConfig:
             max_edges=_int_field(value, "max_edges"),
             max_actions=_int_field(value, "max_actions"),
             max_subjects=_int_field(value, "max_subjects"),
+            opponent_reward_scale=_float_field(value, "opponent_reward_scale", 256.0),
             expander_degree=_int_field(value, "expander_degree"),
             expander_seed=_int_field(value, "expander_seed"),
         )
@@ -112,7 +120,7 @@ class FeatureSchemaConfig:
         except UnicodeDecodeError as error:
             raise SchemaConfigError("invalid schema name utf8") from error
         cursor = end
-        tail = struct.calcsize("<HHBIIIIIBQ")
+        tail = struct.calcsize("<HHBIIIIIfBQ")
         if len(view) != cursor + tail:
             raise SchemaConfigError("bad schema config length")
         (
@@ -124,9 +132,10 @@ class FeatureSchemaConfig:
             max_edges,
             max_actions,
             max_subjects,
+            opponent_reward_scale,
             expander_degree,
             expander_seed,
-        ) = struct.unpack_from("<HHBIIIIIBQ", view, cursor)
+        ) = struct.unpack_from("<HHBIIIIIfBQ", view, cursor)
         return cls(
             name=name,
             node_vocab_size=node_vocab_size,
@@ -137,6 +146,7 @@ class FeatureSchemaConfig:
             max_edges=max_edges,
             max_actions=max_actions,
             max_subjects=max_subjects,
+            opponent_reward_scale=opponent_reward_scale,
             expander_degree=expander_degree,
             expander_seed=expander_seed,
         )
@@ -165,6 +175,10 @@ def _validate_schema_config(config: FeatureSchemaConfig) -> None:
     _check_range("max_edges", config.max_edges, 1, 0xFFFF_FFFF)
     _check_range("max_actions", config.max_actions, 1, 0xFFFF_FFFF)
     _check_range("max_subjects", config.max_subjects, 1, 0xFFFF_FFFF)
+    if not isinstance(config.opponent_reward_scale, (float, int)):
+        raise SchemaConfigError("opponent_reward_scale must be numeric")
+    if not isfinite(config.opponent_reward_scale) or config.opponent_reward_scale <= 0.0:
+        raise SchemaConfigError("opponent_reward_scale must be finite and positive")
     _check_range("expander_degree", config.expander_degree, 0, 0xFF)
     _check_range("expander_seed", config.expander_seed, 0, 0xFFFF_FFFF_FFFF_FFFF)
     if config.expander_degree > 0:
@@ -187,6 +201,13 @@ def _int_field(value: dict[str, object], name: str) -> int:
     if not isinstance(field, int):
         raise SchemaConfigError(f"{name} must be an integer")
     return field
+
+
+def _float_field(value: dict[str, object], name: str, default: float) -> float:
+    field = value.get(name, default)
+    if not isinstance(field, (float, int)):
+        raise SchemaConfigError(f"{name} must be numeric")
+    return float(field)
 
 
 def _str_field(value: dict[str, object], name: str) -> str:

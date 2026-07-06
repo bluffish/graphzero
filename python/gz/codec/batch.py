@@ -38,6 +38,8 @@ class _Layout:
     subject_count: int
     action_subjects: int
     position: int
+    opponent_reward: int
+    opponent_present: int
     total_len: int
 
 
@@ -57,6 +59,8 @@ class BatchView:
     subject_count: np.ndarray
     action_subjects: np.ndarray
     position: np.ndarray
+    opponent_reward: np.ndarray
+    opponent_present: np.ndarray
 
     @property
     def feature_schema_hash(self) -> FeatureSchemaHash:
@@ -130,6 +134,8 @@ class BatchView:
                 (layout.b, layout.a, layout.s),
             ),
             position=_bf16_array(view, layout.position, (layout.b, 4)),
+            opponent_reward=_bf16_array(view, layout.opponent_reward, (layout.b,)),
+            opponent_present=_array(view, layout.opponent_present, "u1", (layout.b,)),
         )
 
 
@@ -165,6 +171,8 @@ def _layout(b: int, n: int, e: int, a: int, s: int, d: int) -> _Layout:
     subject_count, cursor = _section(cursor, b * a)
     action_subjects, cursor = _section(cursor, b * a * s * 2)
     position, cursor = _section(cursor, b * 4 * 2)
+    opponent_reward, cursor = _section(cursor, b * 2)
+    opponent_present, cursor = _section(cursor, b)
     return _Layout(
         b=b,
         n=n,
@@ -185,6 +193,8 @@ def _layout(b: int, n: int, e: int, a: int, s: int, d: int) -> _Layout:
         subject_count=subject_count,
         action_subjects=action_subjects,
         position=position,
+        opponent_reward=opponent_reward,
+        opponent_present=opponent_present,
         total_len=_align4(cursor),
     )
 

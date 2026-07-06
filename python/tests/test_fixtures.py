@@ -65,6 +65,8 @@ def test_attr1_fixture_matches_spec_table() -> None:
         [3.0, 1.0, 0.5, 0.25],
         [0.0, 0.0, 0.0, 0.0],
     ]
+    assert view.opponent_reward.tolist() == [0.0, 0.0, 0.0, 0.0]
+    assert view.opponent_present.tolist() == [0, 0, 0, 0]
 
 
 def test_attr0_fixture_omits_attrs() -> None:
@@ -86,6 +88,8 @@ def test_attr0_fixture_omits_attrs() -> None:
     assert view.subject_count.tolist()[0] == [1, 0, 0]
     assert view.action_subjects[0, 0].tolist() == [1, 0xFFFF]
     assert view.position.tolist()[0] == [0.0, 1.0, 0.25, 0.25]
+    assert view.opponent_reward.tolist() == [0.0, 0.0]
+    assert view.opponent_present.tolist() == [0, 0]
 
 
 def test_expander_fixture_contains_expander_typed_edges() -> None:

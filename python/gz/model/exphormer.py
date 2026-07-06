@@ -24,6 +24,7 @@ class ArchConfig:
     activation: str = "gelu"
     aggregation: str = "attention"
     global_tokens: int = 1
+    value_input: str = "single"
 
     def __post_init__(self) -> None:
         if self.name != "gz-graph-v1":
@@ -40,6 +41,8 @@ class ArchConfig:
             raise ValueError("unsupported aggregation")
         if self.global_tokens <= 0:
             raise ValueError("global_tokens must be positive")
+        if self.value_input not in {"single", "scalar"}:
+            raise ValueError("unsupported value_input")
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -52,6 +55,7 @@ class ArchConfig:
             "activation": self.activation,
             "aggregation": self.aggregation,
             "global_tokens": self.global_tokens,
+            "value_input": self.value_input,
         }
 
     def encode(self) -> bytes:
@@ -75,8 +79,10 @@ class ArchConfig:
             "activation",
             "aggregation",
             "global_tokens",
+            "value_input",
         }
-        if set(value) != fields:
+        keys = set(value)
+        if keys != fields and keys != fields - {"value_input"}:
             raise ValueError("arch config fields mismatch")
         return cls(
             name=_str(value, "name"),
@@ -88,6 +94,7 @@ class ArchConfig:
             activation=_str(value, "activation"),
             aggregation=_str(value, "aggregation"),
             global_tokens=_int(value, "global_tokens"),
+            value_input=_str(value, "value_input", "single"),
         )
 
 
@@ -105,6 +112,8 @@ class GraphBatchTensors(NamedTuple):
     subject_count: object
     action_subjects: object
     position: object
+    opponent_reward: object
+    opponent_present: object
 
 
 def build_model(schema: FeatureSchemaConfig, arch: ArchConfig):
@@ -141,6 +150,8 @@ class BatchStager:
         self.subject_count = _StagedTensor((b, a), torch.int64, self.device, self.pin)
         self.action_subjects = _StagedTensor((b, a, s), torch.int64, self.device, self.pin)
         self.position = _StagedTensor((b, 4), torch.float32, self.device, self.pin)
+        self.opponent_reward = _StagedTensor((b,), torch.float32, self.device, self.pin)
+        self.opponent_present = _StagedTensor((b,), torch.float32, self.device, self.pin)
 
     @classmethod
     def from_view(cls, view: BatchView, device: str | object, pinned_staging: bool = True) -> BatchStager:
@@ -154,6 +165,7 @@ class BatchStager:
             max_edges=view.dims.max_edges,
             max_actions=view.dims.max_actions,
             max_subjects=view.dims.max_subjects,
+            opponent_reward_scale=256.0,
             expander_degree=0,
             expander_seed=0,
         )
@@ -177,6 +189,8 @@ class BatchStager:
         self.subject_count.copy(view.subject_count)
         self.action_subjects.copy(view.action_subjects)
         self.position.copy(view.position)
+        self.opponent_reward.copy(view.opponent_reward)
+        self.opponent_present.copy(view.opponent_present)
         return self.tensors()
 
     def dummy(self) -> GraphBatchTensors:
@@ -195,6 +209,8 @@ class BatchStager:
         self.subject_count.zero_()
         self.action_subjects.fill_(0xFFFF_FFFF)
         self.position.zero_()
+        self.opponent_reward.zero_()
+        self.opponent_present.zero_()
         for tensor in self._all():
             tensor.sync()
         return self.tensors()
@@ -214,6 +230,8 @@ class BatchStager:
             subject_count=self.subject_count.device_tensor,
             action_subjects=self.action_subjects.device_tensor,
             position=self.position.device_tensor,
+            opponent_reward=self.opponent_reward.device_tensor,
+            opponent_present=self.opponent_present.device_tensor,
         )
 
     def _check_view(self, view: BatchView) -> None:
@@ -246,6 +264,8 @@ class BatchStager:
             self.subject_count,
             self.action_subjects,
             self.position,
+            self.opponent_reward,
+            self.opponent_present,
         )
 
 
@@ -290,7 +310,8 @@ def _model_class():
             self.layers = nn.ModuleList([GraphLayer(schema, arch) for _ in range(arch.layers)])
             self.kind_embedding = nn.Embedding(schema.action_kind_vocab_size, arch.dim, padding_idx=0)
             self.policy = _mlp(nn, arch.dim * 3 + 1, arch.ffn_dim, 1, arch.activation, arch.dropout)
-            self.value = _mlp(nn, arch.dim, arch.ffn_dim, 1, arch.activation, arch.dropout)
+            value_dim = arch.dim + (2 if arch.value_input == "scalar" else 0)
+            self.value = _mlp(nn, value_dim, arch.ffn_dim, 1, arch.activation, arch.dropout)
 
         def forward(self, batch: GraphBatchTensors):
             b, n = batch.node_tokens.shape
@@ -313,7 +334,11 @@ def _model_class():
             prior = batch.action_prior.unsqueeze(-1)
             readout = g_readout.unsqueeze(1).expand(-1, batch.action_kind.shape[1], -1)
             logits = self.policy(torch.cat((kind, prior, subject_pool, readout), dim=-1)).squeeze(-1)
-            value_raw = self.value(g_readout).squeeze(-1)
+            value_input = g_readout
+            if self.arch.value_input == "scalar":
+                opponent = torch.stack((batch.opponent_reward, batch.opponent_present), dim=-1).to(g_readout.dtype)
+                value_input = torch.cat((g_readout, opponent), dim=-1)
+            value_raw = self.value(value_input).squeeze(-1)
             return value_raw, logits
 
     class GraphLayer(nn.Module):
@@ -510,8 +535,8 @@ def _float(value: dict[str, object], name: str) -> float:
     return float(field)
 
 
-def _str(value: dict[str, object], name: str) -> str:
-    field = value[name]
+def _str(value: dict[str, object], name: str, default: str | None = None) -> str:
+    field = value.get(name, default)
     if not isinstance(field, str):
         raise ValueError(f"{name} must be a string")
     return field

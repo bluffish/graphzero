@@ -49,6 +49,7 @@ fn write_attr1(path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
         max_edges: 4,
         max_actions: 6,
         max_subjects: 2,
+        opponent_reward_scale: 256.0,
         expander_degree: 0,
         expander_seed: 0,
     })?;
@@ -82,6 +83,8 @@ fn write_attr1(path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
                 leaf_depth: 0,
                 budget_fraction: 1.0,
                 budget_step: 0.125,
+                opponent_reward: 0.0,
+                opponent_present: false,
             },
         },
         FeatureRow {
@@ -95,6 +98,8 @@ fn write_attr1(path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
                 leaf_depth: 2,
                 budget_fraction: 0.75,
                 budget_step: 0.125,
+                opponent_reward: 0.0,
+                opponent_present: false,
             },
         },
         FeatureRow {
@@ -156,6 +161,8 @@ fn write_attr1(path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
                 leaf_depth: 1,
                 budget_fraction: 0.5,
                 budget_step: 0.25,
+                opponent_reward: 0.0,
+                opponent_present: false,
             },
         },
     ];
@@ -173,6 +180,7 @@ fn write_attr0(path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
         max_edges: 2,
         max_actions: 3,
         max_subjects: 2,
+        opponent_reward_scale: 256.0,
         expander_degree: 0,
         expander_seed: 0,
     })?;
@@ -198,6 +206,8 @@ fn write_attr0(path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
             leaf_depth: 1,
             budget_fraction: 0.25,
             budget_step: 0.25,
+            opponent_reward: 0.0,
+            opponent_present: false,
         },
     }];
     write_batch(schema, 2, &rows, path)
@@ -214,6 +224,7 @@ fn write_expander(path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
         max_edges: 10,
         max_actions: 4,
         max_subjects: 2,
+        opponent_reward_scale: 256.0,
         expander_degree: 2,
         expander_seed: 99,
     })?;
@@ -256,6 +267,8 @@ fn write_expander(path: PathBuf) -> Result<(), Box<dyn std::error::Error>> {
             leaf_depth: 0,
             budget_fraction: 0.75,
             budget_step: 0.125,
+            opponent_reward: 0.0,
+            opponent_present: false,
         },
     }];
     write_batch(schema, 2, &rows, path)

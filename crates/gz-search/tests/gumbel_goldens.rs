@@ -218,6 +218,7 @@ fn g3_opponent_stop_reeval_episode_golden() {
                 opponent: Some(GumbelOpponentContext {
                     trajectory_id: 11,
                     row_count: 4,
+                    final_reward: 0.0,
                 }),
                 noise_seed: 0,
             },

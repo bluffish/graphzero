@@ -30,6 +30,7 @@ pub fn schema(name: &str, max_actions: u32) -> FeatureSchema {
         max_edges: 8,
         max_actions,
         max_subjects: 3,
+        opponent_reward_scale: 256.0,
         expander_degree: 0,
         expander_seed: 0,
     })
@@ -67,6 +68,8 @@ pub fn row(node_count: u32, action_count: usize) -> FeatureRow {
             leaf_depth: 2,
             budget_fraction: 0.5,
             budget_step: 0.25,
+            opponent_reward: 0.0,
+            opponent_present: false,
         },
     }
 }

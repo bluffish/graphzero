@@ -50,6 +50,8 @@ def test_offset_arithmetic_and_zero_copy_with_attrs() -> None:
     assert view.subject_count.tolist() == [[1, 0, 0], [0, 0, 0]]
     assert view.action_subjects[0, 0].tolist() == [1, 0xFFFF]
     assert view.position.tolist() == [[2.0, 3.0, 0.75, 0.125], [1.0, 0.0, 1.0, 0.5]]
+    assert view.opponent_reward.tolist() == [0.5, -0.25]
+    assert view.opponent_present.tolist() == [1, 1]
 
     token_offset = _layout(2, 3, 2, 3, 2, 1)["node_tokens"]
     struct.pack_into("<H", buf, token_offset, 6)
@@ -92,6 +94,7 @@ def test_feature_schema_config_codec_roundtrip_and_golden() -> None:
         max_edges=448,
         max_actions=256,
         max_subjects=8,
+        opponent_reward_scale=256.0,
         expander_degree=5,
         expander_seed=42,
     )
@@ -106,6 +109,7 @@ def test_feature_schema_config_codec_roundtrip_and_golden() -> None:
         "c0010000"
         "00010000"
         "08000000"
+        "00008043"
         "05"
         "2a00000000000000"
     )
@@ -157,6 +161,9 @@ def make_batch(attr_dim: int, schema_hash: bytes = SCHEMA_HASH, capacity: int = 
     out[layout["subject_count"]] = 1
     _u16(out, layout["action_subjects"], [1, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF, 0xFFFF])
     _bf16(out, layout["position"], [2.0, 3.0, 0.75, 0.125, 1.0, 0.0, 1.0, 0.5])
+    _bf16(out, layout["opponent_reward"], [0.5, -0.25])
+    out[layout["opponent_present"]] = 1
+    out[layout["opponent_present"] + 1] = 1
     return bytes(out)
 
 
@@ -177,6 +184,8 @@ def _layout(b: int, n: int, e: int, a: int, s: int, d: int) -> dict[str, int]:
         ("subject_count", b * a),
         ("action_subjects", b * a * s * 2),
         ("position", b * 4 * 2),
+        ("opponent_reward", b * 2),
+        ("opponent_present", b),
     ]:
         cursor = _align4(cursor)
         out[name] = cursor

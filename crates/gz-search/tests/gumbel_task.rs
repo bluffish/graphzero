@@ -294,6 +294,7 @@ fn opponent_stop_alignment_emits_second_eval() {
             opponent: Some(GumbelOpponentContext {
                 trajectory_id: 9,
                 row_count: 4,
+                final_reward: -2.0,
             }),
             ..GumbelSearchContext::default()
         },

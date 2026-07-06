@@ -104,45 +104,50 @@ where
         Self { slots }
     }
 
-    pub(crate) fn admit<E, R>(
+    pub(crate) fn admit<E, R, F>(
         &mut self,
         engine: &mut E,
         roots: &mut R,
         admission: &mut Admission<'_>,
-    ) -> EngineResult<(Vec<(EpisodeId, G)>, bool)>
+        mut episode_context: F,
+    ) -> EngineResult<bool>
     where
         E: GraphEngine<Graph = G, Candidate = C>,
         R: RootSource<E>,
+        F: FnMut(
+            &mut E,
+            EpisodeId,
+            G,
+            gz_search::GumbelEpisodeContext,
+        ) -> EngineResult<gz_search::GumbelEpisodeContext>,
     {
-        let mut admitted = Vec::new();
-
         for slot in &mut self.slots {
             if !matches!(slot.state, SlotState::Idle) {
                 continue;
             }
 
             let Some(root) = roots.next_root(engine)? else {
-                return Ok((admitted, true));
+                return Ok(true);
             };
 
             let episode_id = EpisodeId::new(*admission.next_episode_id);
             *admission.next_episode_id += 1;
-            admitted.push((episode_id, root));
+            let context = episode_context(
+                engine,
+                episode_id,
+                root,
+                gz_search::GumbelEpisodeContext {
+                    noise_seed: crate::root::episode_noise_seed(episode_id.value()),
+                    ..admission.context
+                },
+            )?;
             slot.state = SlotState::Running(ActiveEpisode {
-                task: GumbelEpisodeTask::new(
-                    admission.search,
-                    admission.identity,
-                    root,
-                    gz_search::GumbelEpisodeContext {
-                        noise_seed: crate::root::episode_noise_seed(episode_id.value()),
-                        ..admission.context
-                    },
-                ),
+                task: GumbelEpisodeTask::new(admission.search, admission.identity, root, context),
                 episode_id,
             });
         }
 
-        Ok((admitted, false))
+        Ok(false)
     }
 
     /// Admits one episode outside the root source -- the opponent rollout
@@ -226,7 +231,8 @@ where
                         };
                         let row = match extractor.as_deref_mut() {
                             Some(extractor) => {
-                                let position = position_features(work.request.position);
+                                let scale = extractor.schema().config().opponent_reward_scale;
+                                let position = position_features(work.request.position, scale);
                                 match extractor.extract(
                                     engine,
                                     work.graph,
@@ -404,11 +410,19 @@ where
     engine.release(&handles.graphs, &handles.candidates)
 }
 
-const fn position_features(position: gz_eval::EvalPositionContext) -> PositionFeatures {
+fn position_features(
+    position: gz_eval::EvalPositionContext,
+    opponent_reward_scale: f32,
+) -> PositionFeatures {
+    let opponent = position.opponent;
     PositionFeatures {
         root_step: position.root_step,
         leaf_depth: position.leaf_depth,
         budget_fraction: position.budget_fraction,
         budget_step: position.budget_step,
+        opponent_reward: opponent.map_or(0.0, |opponent| {
+            opponent.final_reward / opponent_reward_scale
+        }),
+        opponent_present: opponent.is_some(),
     }
 }

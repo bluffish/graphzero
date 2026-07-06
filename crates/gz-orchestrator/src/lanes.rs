@@ -13,7 +13,10 @@ use gz_features::{
     PositionFeatures, encode_feature_row,
 };
 use gz_replay::{ReplayEpisodeRecord, ReplayError, ReplayRow, ReplayStore};
-use gz_search::{EngineIdentity, GumbelEpisode, GumbelEpisodeContext, GumbelMcts, WorkToken};
+use gz_search::{
+    EngineIdentity, GumbelEpisode, GumbelEpisodeContext, GumbelMcts, GumbelOpponentContext,
+    WorkToken,
+};
 use std::collections::HashMap;
 use std::num::NonZeroU64;
 use std::num::NonZeroUsize;
@@ -615,13 +618,15 @@ where
         None
     }
 
-    fn on_admitted(
+    fn episode_context(
         &mut self,
         engine: &mut E,
-        admitted: Vec<(EpisodeId, E::Graph)>,
-    ) -> EngineResult<()> {
-        let _ = (engine, admitted);
-        Ok(())
+        episode_id: EpisodeId,
+        root: E::Graph,
+        context: GumbelEpisodeContext,
+    ) -> EngineResult<GumbelEpisodeContext> {
+        let _ = (engine, episode_id, root);
+        Ok(context)
     }
 
     fn drive(
@@ -679,9 +684,12 @@ where
                     context: runtime.context,
                     next_episode_id: &mut next_episode_id,
                 };
-                let (admitted, exhausted) = pool.admit(&mut engine, &mut roots, &mut admission)?;
-                roots_exhausted = exhausted;
-                mode.on_admitted(&mut engine, admitted)?;
+                roots_exhausted = pool.admit(
+                    &mut engine,
+                    &mut roots,
+                    &mut admission,
+                    |engine, id, root, context| mode.episode_context(engine, id, root, context),
+                )?;
             } else if !pool.active()
                 && let Some(gate_poll) = mode.gate_poll()
             {
@@ -902,16 +910,17 @@ where
         self.backpressure.map(|backpressure| backpressure.gate_poll)
     }
 
-    fn on_admitted(
+    fn episode_context(
         &mut self,
         engine: &mut E,
-        admitted: Vec<(EpisodeId, E::Graph)>,
-    ) -> EngineResult<()> {
-        for (episode_id, root) in admitted {
-            self.references
-                .insert(episode_id, self.provider.reference(engine, root)?);
-        }
-        Ok(())
+        episode_id: EpisodeId,
+        root: E::Graph,
+        mut context: GumbelEpisodeContext,
+    ) -> EngineResult<GumbelEpisodeContext> {
+        let reference = self.provider.reference(engine, root)?;
+        context.opponent = reference.as_ref().map(opponent_context);
+        self.references.insert(episode_id, reference);
+        Ok(context)
     }
 
     fn drive(
@@ -1042,12 +1051,15 @@ where
         self.replay.gate_poll()
     }
 
-    fn on_admitted(
+    fn episode_context(
         &mut self,
         engine: &mut E,
-        admitted: Vec<(EpisodeId, E::Graph)>,
-    ) -> EngineResult<()> {
-        self.replay.on_admitted(engine, admitted)
+        episode_id: EpisodeId,
+        root: E::Graph,
+        context: GumbelEpisodeContext,
+    ) -> EngineResult<GumbelEpisodeContext> {
+        self.replay
+            .episode_context(engine, episode_id, root, context)
     }
 
     fn drive(
@@ -1093,8 +1105,13 @@ where
             .references
             .remove(&completed.episode_id)
             .ok_or_else(|| internal("missing replay reference"))?;
-        let feature_rows =
-            feature_rows_for_episode(engine, &mut self.extractor, search, &completed.episode)?;
+        let feature_rows = feature_rows_for_episode(
+            engine,
+            &mut self.extractor,
+            search,
+            &completed.episode,
+            reference.as_ref(),
+        )?;
         self.replay.summary.episodes_completed += 1;
 
         if let Some((record, rows)) = project_episode(
@@ -1174,6 +1191,7 @@ fn feature_rows_for_episode<E, X>(
     extractor: &mut X,
     search: &GumbelMcts,
     episode: &GumbelEpisode<E::Graph, E::Candidate>,
+    reference: Option<&Reference>,
 ) -> EngineResult<EpisodeFeatureRows<E::Candidate>>
 where
     E: GraphEngine,
@@ -1194,22 +1212,7 @@ where
         created_candidates.extend(candidates.iter().copied());
         // Mirror the eval-side export gate: rows must train the model on
         // the same position inputs it served with.
-        let position = if search.config().export_position {
-            let (budget_fraction, budget_step) = search.root_budget(index);
-            PositionFeatures {
-                root_step: u32::try_from(index).map_err(|_| internal("root step overflow"))?,
-                leaf_depth: 0,
-                budget_fraction,
-                budget_step,
-            }
-        } else {
-            PositionFeatures {
-                root_step: 0,
-                leaf_depth: 0,
-                budget_fraction: 0.0,
-                budget_step: 0.0,
-            }
-        };
+        let position = replay_position_features(search, extractor.schema(), index, reference)?;
         let row = extractor
             .extract(engine, step.before, &candidates, position)
             .map_err(|_| internal("feature extraction failed"))?;
@@ -1226,6 +1229,43 @@ where
     Ok(EpisodeFeatureRows {
         rows: out,
         candidates: created_candidates,
+    })
+}
+
+fn opponent_context(reference: &Reference) -> GumbelOpponentContext {
+    GumbelOpponentContext {
+        trajectory_id: 0,
+        row_count: reference.steps.len() as u32,
+        final_reward: reference.final_reward,
+    }
+}
+
+fn replay_position_features(
+    search: &GumbelMcts,
+    schema: &FeatureSchema,
+    index: usize,
+    reference: Option<&Reference>,
+) -> EngineResult<PositionFeatures> {
+    let (root_step, budget_fraction, budget_step) = if search.config().export_position {
+        let (budget_fraction, budget_step) = search.root_budget(index);
+        (
+            u32::try_from(index).map_err(|_| internal("root step overflow"))?,
+            budget_fraction,
+            budget_step,
+        )
+    } else {
+        (0, 0.0, 0.0)
+    };
+    let scale = schema.config().opponent_reward_scale;
+    let opponent_reward = reference.map_or(0.0, |reference| reference.final_reward / scale);
+
+    Ok(PositionFeatures {
+        root_step,
+        leaf_depth: 0,
+        budget_fraction,
+        budget_step,
+        opponent_reward,
+        opponent_present: reference.is_some(),
     })
 }
 
@@ -1257,17 +1297,15 @@ where
 struct OpponentRollout {
     search: GumbelMcts,
     identity: EngineIdentity,
-    context: GumbelEpisodeContext,
     latest_version: Option<ModelVersion>,
     in_flight: Option<EpisodeId>,
 }
 
 impl OpponentRollout {
-    fn new(search: &GumbelMcts, identity: EngineIdentity, context: GumbelEpisodeContext) -> Self {
+    fn new(search: &GumbelMcts, identity: EngineIdentity, _context: GumbelEpisodeContext) -> Self {
         Self {
             search: search.policy_rollout(),
             identity,
-            context,
             latest_version: None,
             in_flight: None,
         }
@@ -1312,7 +1350,7 @@ impl OpponentRollout {
             root,
             GumbelEpisodeContext {
                 noise_seed: 0,
-                ..self.context
+                opponent: None,
             },
             episode_id,
         );

@@ -116,6 +116,7 @@ fn schema() -> FeatureSchema {
         max_edges: 8,
         max_actions: 8,
         max_subjects: 2,
+        opponent_reward_scale: 256.0,
         expander_degree: 0,
         expander_seed: 0,
     })
@@ -157,6 +158,8 @@ fn synthetic_row(batch: u64, row: u64) -> FeatureRow {
             leaf_depth: row as u32,
             budget_fraction: 1.0,
             budget_step: 0.0,
+            opponent_reward: 0.0,
+            opponent_present: false,
         },
     }
 }

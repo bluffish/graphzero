@@ -28,7 +28,7 @@ pub struct GumbelMctsConfig {
     pub measure_options: MeasureOptions,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash, Default)]
+#[derive(Clone, Copy, Debug, PartialEq, Default)]
 pub struct GumbelEpisodeContext {
     pub opponent: Option<GumbelOpponentContext>,
     /// Mixed into the root Gumbel RNG so episodes sharing a root explore
@@ -64,10 +64,11 @@ impl Default for GumbelSearchContext {
     }
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq, Hash)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct GumbelOpponentContext {
     pub trajectory_id: u64,
     pub row_count: u32,
+    pub final_reward: f32,
 }
 
 impl From<GumbelOpponentContext> for EvalOpponentContext {
@@ -75,6 +76,7 @@ impl From<GumbelOpponentContext> for EvalOpponentContext {
         Self {
             trajectory_id: context.trajectory_id,
             row_count: context.row_count,
+            final_reward: context.final_reward,
         }
     }
 }

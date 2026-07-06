@@ -128,6 +128,12 @@ impl FeatureCollator {
             write_bf16_at(out, position + 2, row.position.leaf_depth as f32);
             write_bf16_at(out, position + 4, row.position.budget_fraction);
             write_bf16_at(out, position + 6, row.position.budget_step);
+            write_bf16_at(
+                out,
+                layout.opponent_reward + row_index * 2,
+                row.position.opponent_reward,
+            );
+            out[layout.opponent_present + row_index] = u8::from(row.position.opponent_present);
         }
 
         Ok(())
@@ -268,6 +274,8 @@ pub struct FeatureBatchView {
     pub subject_count: Vec<u8>,
     pub action_subjects: Vec<u32>,
     pub position: Vec<[f32; 4]>,
+    pub opponent_reward: Vec<f32>,
+    pub opponent_present: Vec<u8>,
 }
 
 impl FeatureBatchView {
@@ -313,6 +321,9 @@ impl FeatureBatchView {
                 layout.b * layout.a * layout.s,
             )?,
             position: read_position_vec(bytes, layout.position, layout.b)?,
+            opponent_reward: read_bf16_vec(bytes, layout.opponent_reward, layout.b)?,
+            opponent_present: bytes[layout.opponent_present..layout.opponent_present + layout.b]
+                .to_vec(),
         })
     }
 }
@@ -382,6 +393,8 @@ struct BatchLayout {
     subject_count: usize,
     action_subjects: usize,
     position: usize,
+    opponent_reward: usize,
+    opponent_present: usize,
     total_len: usize,
 }
 
@@ -413,6 +426,8 @@ impl BatchLayout {
         let subject_count = section(&mut cursor, b * a);
         let action_subjects = section(&mut cursor, b * a * s * 2);
         let position = section(&mut cursor, b * 4 * 2);
+        let opponent_reward = section(&mut cursor, b * 2);
+        let opponent_present = section(&mut cursor, b);
         let total_len = align4(cursor);
 
         Self {
@@ -435,6 +450,8 @@ impl BatchLayout {
             subject_count,
             action_subjects,
             position,
+            opponent_reward,
+            opponent_present,
             total_len,
         }
     }
