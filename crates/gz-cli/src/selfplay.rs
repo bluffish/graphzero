@@ -378,7 +378,10 @@ fn run_random(
         ThreadedOrchestratorConfig {
             workers_per_lane: nonzero(config.workers_per_lane, "workers_per_lane")?,
             max_batch: nonzero(config.max_batch, "max_batch")?,
-            flush_after: Duration::from_millis(1),
+            // 3ms: at ~10ms model forwards a 1ms lull shipped partial
+            // batches (bootstrap fill averaged 29/128); the deeper
+            // in-flight pool refills within this window.
+            flush_after: Duration::from_millis(3),
         },
     );
     let run = orchestrator
@@ -539,7 +542,10 @@ fn threaded_config(config: &SelfplayConfig) -> Result<ThreadedOrchestratorConfig
     Ok(ThreadedOrchestratorConfig {
         workers_per_lane: nonzero(config.workers_per_lane, "workers_per_lane")?,
         max_batch: nonzero(config.max_batch, "max_batch")?,
-        flush_after: Duration::from_millis(1),
+        // 3ms: at ~10ms model forwards a 1ms lull shipped partial
+        // batches (bootstrap fill averaged 29/128); the deeper
+        // in-flight pool refills within this window.
+        flush_after: Duration::from_millis(3),
     })
 }
 
