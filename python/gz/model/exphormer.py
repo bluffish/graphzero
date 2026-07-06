@@ -25,6 +25,7 @@ class ArchConfig:
     aggregation: str = "attention"
     global_tokens: int = 1
     value_input: str = "single"
+    policy_head: str = "mlp"
 
     def __post_init__(self) -> None:
         if self.name != "gz-graph-v1":
@@ -43,6 +44,8 @@ class ArchConfig:
             raise ValueError("global_tokens must be positive")
         if self.value_input not in {"single", "scalar", "pair"}:
             raise ValueError("unsupported value_input")
+        if self.policy_head not in {"mlp", "pointer"}:
+            raise ValueError("unsupported policy_head")
 
     def to_dict(self) -> dict[str, object]:
         return {
@@ -56,6 +59,7 @@ class ArchConfig:
             "aggregation": self.aggregation,
             "global_tokens": self.global_tokens,
             "value_input": self.value_input,
+            "policy_head": self.policy_head,
         }
 
     def encode(self) -> bytes:
@@ -80,9 +84,11 @@ class ArchConfig:
             "aggregation",
             "global_tokens",
             "value_input",
+            "policy_head",
         }
+        optional = {"value_input", "policy_head"}
         keys = set(value)
-        if keys != fields and keys != fields - {"value_input"}:
+        if not (fields - optional <= keys <= fields):
             raise ValueError("arch config fields mismatch")
         return cls(
             name=_str(value, "name"),
@@ -95,6 +101,7 @@ class ArchConfig:
             aggregation=_str(value, "aggregation"),
             global_tokens=_int(value, "global_tokens"),
             value_input=_str(value, "value_input", "single"),
+            policy_head=_str(value, "policy_head", "mlp"),
         )
 
 
@@ -377,7 +384,10 @@ def _model_class():
             self.global_tokens = nn.Parameter(torch.zeros(arch.global_tokens, arch.dim))
             self.layers = nn.ModuleList([GraphLayer(schema, arch) for _ in range(arch.layers)])
             self.kind_embedding = nn.Embedding(schema.action_kind_vocab_size, arch.dim, padding_idx=0)
-            self.policy = _mlp(nn, arch.dim * 3 + 1, arch.ffn_dim, 1, arch.activation, arch.dropout)
+            if arch.policy_head == "pointer":
+                self.policy = PointerPolicyHead(arch)
+            else:
+                self.policy = _mlp(nn, arch.dim * 3 + 1, arch.ffn_dim, 1, arch.activation, arch.dropout)
             value_dim = arch.dim
             if arch.value_input == "scalar":
                 value_dim += 2
@@ -392,7 +402,13 @@ def _model_class():
             kind = self.kind_embedding(batch.action_kind.clamp(0, self.schema.action_kind_vocab_size - 1))
             prior = batch.action_prior.unsqueeze(-1)
             readout = g_readout.unsqueeze(1).expand(-1, batch.action_kind.shape[1], -1)
-            logits = self.policy(torch.cat((kind, prior, subject_pool, readout), dim=-1)).squeeze(-1)
+            action_feat = torch.cat((kind, prior, subject_pool, readout), dim=-1)
+            if self.arch.policy_head == "pointer":
+                action_index = torch.arange(action_feat.shape[1], device=action_feat.device)
+                action_mask = action_index.unsqueeze(0) < batch.action_count.unsqueeze(1)
+                logits = self.policy(g_readout, action_feat, action_mask)
+            else:
+                logits = self.policy(action_feat).squeeze(-1)
 
             value_input = g_readout
             if self.arch.value_input == "scalar":
@@ -428,6 +444,49 @@ def _model_class():
                 h, g = layer(h, g, graph, node_mask)
 
             return h, g.mean(dim=1), node_mask
+
+    class PointerPolicyHead(nn.Module):
+        # whittlezero's tsp_pointer scorer: a multi-head glimpse over the
+        # action tokens refines the graph readout into a board query, and
+        # a single-head dot product against the same tokens produces the
+        # logits, tanh-bounded to +/-CLIP. Scores are relative across the
+        # action set; the per-candidate MLP scores each action in
+        # isolation and its logit scale is unbounded.
+        CLIP = 10.0
+
+        def __init__(self, arch: ArchConfig) -> None:
+            super().__init__()
+            dim = arch.dim
+            self.heads = arch.heads
+            self.token_proj = nn.Linear(arch.dim * 3 + 1, dim)
+            self.glimpse_query = nn.Linear(dim, dim, bias=False)
+            self.glimpse_key = nn.Linear(dim, dim, bias=False)
+            self.glimpse_value = nn.Linear(dim, dim, bias=False)
+            self.glimpse_unify = nn.Linear(dim, dim)
+            self.board_ffn = nn.Sequential(
+                nn.Linear(dim, arch.ffn_dim),
+                _activation_module(nn, arch.activation),
+                nn.Linear(arch.ffn_dim, dim),
+            )
+            self.pointer_key = nn.Linear(dim, dim, bias=False)
+
+        def forward(self, readout, action_feat, action_mask):
+            b, a, _ = action_feat.shape
+            tokens = self.token_proj(action_feat)
+            dim = tokens.shape[-1]
+            split = dim // self.heads
+            query = self.glimpse_query(readout).view(b, self.heads, split)
+            keys = self.glimpse_key(tokens).view(b, a, self.heads, split)
+            values = self.glimpse_value(tokens).view(b, a, self.heads, split)
+            scores = torch.einsum("bhs,bahs->bha", query, keys) / math.sqrt(split)
+            # -1e9, not -inf: rows past row_count have zero valid actions,
+            # and an all--inf softmax row is NaN.
+            scores = scores.masked_fill(~action_mask.unsqueeze(1), -1.0e9)
+            board = torch.einsum("bha,bahs->bhs", torch.softmax(scores, dim=-1), values)
+            board = self.glimpse_unify(board.reshape(b, dim))
+            board = board + self.board_ffn(board)
+            raw = torch.einsum("bd,bad->ba", board, self.pointer_key(tokens)) / math.sqrt(dim)
+            return self.CLIP * torch.tanh(raw)
 
     class GraphLayer(nn.Module):
         def __init__(self, schema: FeatureSchemaConfig, arch: ArchConfig) -> None:

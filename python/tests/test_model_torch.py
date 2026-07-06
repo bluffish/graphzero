@@ -7,7 +7,7 @@ import pytest
 
 from gz.codec import BatchView, FeatureSchemaConfig
 from gz.model.exphormer import ArchConfig, BatchStager, build_model
-from python.tests.test_codec import _layout, make_batch
+from python.tests.test_codec import _bf16, _layout, _u16, make_batch
 
 torch = pytest.importorskip("torch")
 
@@ -175,6 +175,43 @@ def test_pair_value_head_uses_opponent_state() -> None:
     assert logits.shape == (2, 3)
     torch.testing.assert_close(changed_logits, logits, rtol=0, atol=0)
     assert not torch.equal(changed_values, values)
+
+
+def test_pointer_policy_head_bounded_and_masks_padded_actions() -> None:
+    view = BatchView.parse(make_batch(attr_dim=1))
+    changed_bytes = bytearray(make_batch(attr_dim=1))
+    layout = _layout(2, 3, 2, 3, 2, 1)
+    # Mutate action slots past each row's action_count (row 0 counts 2,
+    # row 1 counts 1): padded slots must not leak through the glimpse.
+    _u16(changed_bytes, layout["action_kind"] + 2 * 2, [3])
+    _bf16(changed_bytes, layout["action_prior"] + 2 * 2, [0.75])
+    _u16(changed_bytes, layout["action_kind"] + 4 * 2, [5])
+    _bf16(changed_bytes, layout["action_prior"] + 4 * 2, [0.5])
+    changed = BatchView.parse(changed_bytes)
+    schema = schema_for_view(view, node_vocab_size=7, edge_type_count=2, action_kind_vocab_size=8)
+    arch = ArchConfig(
+        dim=16,
+        layers=1,
+        heads=4,
+        ffn_dim=32,
+        dropout=0.0,
+        aggregation="attention",
+        policy_head="pointer",
+    )
+    model = build_model(schema, arch).eval()
+
+    values, logits = run_model(model, schema, view)
+    changed_values, changed_logits = run_model(model, schema, changed)
+
+    assert values.shape == (2,)
+    assert logits.shape == (2, 3)
+    assert logits.abs().max() <= 10.0
+    torch.testing.assert_close(changed_values, values, rtol=0, atol=0)
+    torch.testing.assert_close(changed_logits[0, :2], logits[0, :2], rtol=0, atol=0)
+    torch.testing.assert_close(changed_logits[1, :1], logits[1, :1], rtol=0, atol=0)
+    assert ArchConfig.from_dict(make_arch("attention").to_dict()).policy_head == "mlp"
+    legacy = {k: v for k, v in make_arch("attention").to_dict().items() if k != "policy_head"}
+    assert ArchConfig.from_dict(legacy).policy_head == "mlp"
 
 
 def run_model(model: object, schema: FeatureSchemaConfig, view: BatchView):
