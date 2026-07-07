@@ -185,13 +185,19 @@ where
     }
 
     pub(super) fn position(&self, leaf_depth: usize) -> EvalPositionContext {
+        // Opponent alignment always uses the real step and depth --
+        // export_position zeroing applies to the exported scalars only,
+        // never to which opponent state a pair eval sees.
+        let opponent = self.context.opponent.map(|opponent| {
+            opponent.aligned_to(u64::from(self.context.root_step) + leaf_depth as u64)
+        });
         if !self.context.export_position {
             return EvalPositionContext {
                 root_step: 0,
                 leaf_depth: 0,
                 budget_fraction: 0.0,
                 budget_step: 0.0,
-                opponent: self.context.opponent.map(Into::into),
+                opponent,
             };
         }
         EvalPositionContext {
@@ -199,7 +205,7 @@ where
             leaf_depth: leaf_depth as u32,
             budget_fraction: self.context.budget_fraction,
             budget_step: self.context.budget_step,
-            opponent: self.context.opponent.map(Into::into),
+            opponent,
         }
     }
 }

@@ -554,3 +554,20 @@ fn no_backtrack_collapses_to_stop_when_every_rewrite_revisits() {
     assert_eq!(episode.final_graph, 10);
     assert_eq!(episode.stop_reason, GumbelStopReason::SelectedStop);
 }
+
+#[test]
+fn opponent_context_aligns_to_leaf_time_and_clamps_to_horizon() {
+    let opponent = GumbelOpponentContext {
+        trajectory_id: 9,
+        row_count: 4,
+        final_reward: -104.0,
+    };
+    assert_eq!(opponent.aligned_to(1).row, 1);
+    assert_eq!(opponent.aligned_to(64).row, 3, "clamped to the last row");
+    let empty = GumbelOpponentContext {
+        trajectory_id: 9,
+        row_count: 0,
+        final_reward: 0.0,
+    };
+    assert_eq!(empty.aligned_to(5).row, 0);
+}

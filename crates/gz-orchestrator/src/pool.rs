@@ -242,10 +242,14 @@ where
                                     position,
                                 ) {
                                     Ok(mut row) => {
-                                        // The task's real step, not the request's
-                                        // root_step: export_position zeroes the
-                                        // latter, and opponent alignment must
-                                        // match the row projection's real index.
+                                        // Pair evals attach the opponent state at
+                                        // the row the search aligned to (real root
+                                        // step + leaf depth, advanced to the
+                                        // opponent's horizon for STOP re-evals) --
+                                        // never the request's exported root_step,
+                                        // which export_position zeroes. The task's
+                                        // real step is the fallback for references
+                                        // without per-step states.
                                         let root_step =
                                             match u32::try_from(episode.task.step_index()) {
                                                 Ok(root_step) => root_step,
@@ -254,7 +258,12 @@ where
                                                     return Err(internal("root step overflow"));
                                                 }
                                             };
-                                        decorate_row(episode.episode_id, root_step, &mut row);
+                                        let opponent_row = work
+                                            .request
+                                            .position
+                                            .opponent_row()
+                                            .unwrap_or(root_step);
+                                        decorate_row(episode.episode_id, opponent_row, &mut row);
                                         Some(row)
                                     }
                                     Err(_) => {

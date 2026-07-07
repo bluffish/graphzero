@@ -111,11 +111,15 @@ pub struct EvalPositionContext {
 }
 
 impl EvalPositionContext {
+    /// The opponent trajectory row this eval pairs with. Carried on the
+    /// opponent context (computed search-side from the real root step
+    /// and leaf depth, which export_position zeroing never touches);
+    /// None when the reference has no per-step states.
     #[must_use]
     pub fn opponent_row(self) -> Option<u32> {
         let opponent = self.opponent?;
-        let last = opponent.row_count.checked_sub(1)?;
-        Some(self.root_step.saturating_add(self.leaf_depth).min(last))
+        opponent.row_count.checked_sub(1)?;
+        Some(opponent.row)
     }
 }
 
@@ -136,6 +140,13 @@ pub struct EvalOpponentContext {
     pub trajectory_id: u64,
     pub row_count: u32,
     pub final_reward: f32,
+    /// The trajectory row aligned with this eval: the leaf's time point
+    /// min(root_step + leaf_depth, row_count - 1). A pair-value leaf d
+    /// plies past the root must see the opponent advanced d steps too,
+    /// and a STOP re-eval at the opponent's horizon must see its final
+    /// state -- pairing by root time alone overstates the value of
+    /// stopping by however much the opponent still improves.
+    pub row: u32,
 }
 
 #[derive(Clone, Debug, PartialEq)]

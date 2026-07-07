@@ -91,12 +91,16 @@ pub struct GumbelOpponentContext {
     pub final_reward: f32,
 }
 
-impl From<GumbelOpponentContext> for EvalOpponentContext {
-    fn from(context: GumbelOpponentContext) -> Self {
-        Self {
-            trajectory_id: context.trajectory_id,
-            row_count: context.row_count,
-            final_reward: context.final_reward,
+impl GumbelOpponentContext {
+    /// The eval-side opponent context aligned to a time point: the
+    /// trajectory row at `min(step, row_count - 1)`.
+    #[must_use]
+    pub fn aligned_to(self, step: u64) -> EvalOpponentContext {
+        EvalOpponentContext {
+            trajectory_id: self.trajectory_id,
+            row_count: self.row_count,
+            final_reward: self.final_reward,
+            row: step.min(u64::from(self.row_count.saturating_sub(1))) as u32,
         }
     }
 }
