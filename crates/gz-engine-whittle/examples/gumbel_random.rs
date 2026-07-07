@@ -29,6 +29,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         max_considered_actions,
         seed: search_seed,
         gumbel_scale: 1.0,
+        gumbel_noise_overlap: -1.0,
         c_visit: 50.0,
         c_scale: 1.0,
         temperature_moves: 0,

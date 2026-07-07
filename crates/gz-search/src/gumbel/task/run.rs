@@ -1,5 +1,6 @@
 use super::super::schedule::{
-    GumbelRng, considered_actions, considered_visit_sequence, root_seed, sample_root_gumbels,
+    GumbelRng, considered_actions, considered_visit_sequence, overlap_noise_scale, root_seed,
+    sample_root_gumbels,
 };
 use super::root::GumbelRootTask;
 use super::state::RunState;
@@ -45,7 +46,17 @@ where
             self.config.seed ^ self.context.noise_seed,
             self.context.root_step,
         ));
-        let root_gumbels = sample_root_gumbels(action_count, self.config.gumbel_scale, &mut rng);
+        let scale = if self.config.gumbel_noise_overlap >= 0.0 {
+            overlap_noise_scale(
+                &self.tree.nodes[root_index].logits,
+                self.config.max_considered_actions.get(),
+                self.config.gumbel_noise_overlap,
+                self.config.gumbel_scale,
+            )
+        } else {
+            self.config.gumbel_scale
+        };
+        let root_gumbels = sample_root_gumbels(action_count, scale, &mut rng);
         let mut base_scores = Vec::with_capacity(action_count);
 
         for (index, logit) in self.tree.nodes[root_index]

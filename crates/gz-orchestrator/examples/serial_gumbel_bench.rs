@@ -23,6 +23,7 @@ fn main() -> gz_engine::EngineResult<()> {
         max_considered_actions: config.max_considered_actions,
         seed: config.search_seed,
         gumbel_scale: 1.0,
+        gumbel_noise_overlap: -1.0,
         c_visit: 50.0,
         c_scale: 1.0,
         temperature_moves: 0,

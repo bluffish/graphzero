@@ -124,6 +124,7 @@ fn parse_selfplay(args: Vec<String>) -> Result<SelfplayConfig, String> {
             "--simulations" => config.simulations = parse_usize(flag, value)?,
             "--max-considered" => config.max_considered = parse_usize(flag, value)?,
             "--gumbel-scale" => config.gumbel_scale = parse_f32(flag, value)?,
+            "--gumbel-noise-overlap" => config.gumbel_noise_overlap = parse_f32(flag, value)?,
             "--tree-reuse" => config.tree_reuse = parse_bool(flag, value)?,
             "--max-candidates" => config.max_candidates = parse_usize(flag, value)?,
             "--max-batch" => max_batch = Some(parse_usize(flag, value)?),
@@ -170,5 +171,5 @@ fn parse_bool(flag: &str, value: &str) -> Result<bool, String> {
 }
 
 fn usage() -> &'static str {
-    "usage: graphzero selfplay --replay-dir PATH [--episodes N; 0 = unbounded] [--lanes L] [--workers-per-lane W] [--reference root|greedy|beam|random|self-average|policy|gated-policy|none] [--root-mode generated|fixed] [--reference-ema-decay D] [--evaluator random|stub|process-stub|torch] [--python-dir PATH] [--checkpoint-dir DIR] [--eval-device DEV] [--eval-poll-interval SECS] [--seed S] [--max-steps M] [--simulations K] [--max-considered M] [--gumbel-scale G] [--tree-reuse true|false] [--max-candidates N] [--max-batch B] [--serve-socket PATH] [--serve-max-batch B] [--replay-backlog ROWS] [--replay-retain ROWS] [--position-features true|false] [--no-backtrack true|false] [--eval-processes N]\n       graphzero replay-serve --replay-dir PATH --socket PATH --max-batch B"
+    "usage: graphzero selfplay --replay-dir PATH [--episodes N; 0 = unbounded] [--lanes L] [--workers-per-lane W] [--reference root|greedy|beam|random|self-average|policy|gated-policy|none] [--root-mode generated|fixed] [--reference-ema-decay D] [--evaluator random|stub|process-stub|torch] [--python-dir PATH] [--checkpoint-dir DIR] [--eval-device DEV] [--eval-poll-interval SECS] [--seed S] [--max-steps M] [--simulations K] [--max-considered M] [--gumbel-scale G] [--gumbel-noise-overlap V; negative disables] [--tree-reuse true|false] [--max-candidates N] [--max-batch B] [--serve-socket PATH] [--serve-max-batch B] [--replay-backlog ROWS] [--replay-retain ROWS] [--position-features true|false] [--no-backtrack true|false] [--eval-processes N]\n       graphzero replay-serve --replay-dir PATH --socket PATH --max-batch B"
 }

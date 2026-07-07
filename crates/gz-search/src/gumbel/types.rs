@@ -16,6 +16,13 @@ pub struct GumbelMctsConfig {
     pub c_visit: f32,
     pub c_scale: f32,
     pub temperature_moves: usize,
+    /// Auto-temper the root Gumbel noise (whittlezero's overlap): when
+    /// non-negative, per-root bisection replaces gumbel_scale with the
+    /// scale at which a noisy argmax lands in the prior's top-m actions
+    /// with probability overlap + 0.05 (the noisy argmax distributes as
+    /// softmax(logits/scale)). Sharp policies get more noise, flat ones
+    /// less; negative disables. Part of the search config hash.
+    pub gumbel_noise_overlap: f32,
     pub tree_reuse: bool,
     /// Export real position features (root_step, leaf_depth, budget) to
     /// evals and feature rows. Off zeroes the exported values so the

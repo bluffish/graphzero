@@ -50,6 +50,7 @@ pub fn gumbel_search_config_hash(
     max_considered_actions: usize,
     seed: u64,
     gumbel_scale: f32,
+    gumbel_noise_overlap: f32,
     c_visit: f32,
     c_scale: f32,
     temperature_moves: usize,
@@ -64,12 +65,14 @@ pub fn gumbel_search_config_hash(
     // budget (semantics change without a config-shape change).
     // v4: mask_stop joins the config shape.
     // v5: no_backtrack joins the config shape.
-    update_chunk(&mut hasher, b"gz-search-gumbel-mcts-v5");
+    // v6: gumbel_noise_overlap joins the config shape.
+    update_chunk(&mut hasher, b"gz-search-gumbel-mcts-v6");
     update_u64(&mut hasher, max_steps as u64);
     update_u64(&mut hasher, simulations as u64);
     update_u64(&mut hasher, max_considered_actions as u64);
     update_u64(&mut hasher, seed);
     update_u32(&mut hasher, gumbel_scale.to_bits());
+    update_u32(&mut hasher, gumbel_noise_overlap.to_bits());
     update_u32(&mut hasher, c_visit.to_bits());
     update_u32(&mut hasher, c_scale.to_bits());
     update_u64(&mut hasher, temperature_moves as u64);

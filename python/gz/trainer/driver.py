@@ -75,6 +75,8 @@ class SelfplayConfig:
     position_features: bool = True
     # Mask search actions that revisit the current or a prior episode root.
     no_backtrack: bool = False
+    # Auto-temper root noise to policy sharpness; negative disables.
+    gumbel_noise_overlap: float = -1.0
     # Evaluator server processes; lanes stripe across them (torch only).
     eval_processes: int = 1
 
@@ -680,6 +682,8 @@ def spawn_torch_selfplay(config: RunConfig) -> subprocess.Popen[bytes]:
             "true" if config.selfplay.position_features else "false",
             "--no-backtrack",
             "true" if config.selfplay.no_backtrack else "false",
+            "--gumbel-noise-overlap",
+            str(config.selfplay.gumbel_noise_overlap),
             "--eval-processes",
             str(config.selfplay.eval_processes),
             "--evaluator",

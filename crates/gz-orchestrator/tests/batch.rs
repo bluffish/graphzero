@@ -18,6 +18,7 @@ fn search(engine: &WhittleEngine, tree_reuse: bool) -> GumbelMcts {
         max_considered_actions: NonZeroUsize::new(4).unwrap(),
         seed: 5,
         gumbel_scale: 0.0,
+        gumbel_noise_overlap: -1.0,
         c_visit: 50.0,
         c_scale: 1.0,
         temperature_moves: 0,

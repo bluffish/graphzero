@@ -71,6 +71,7 @@ fn config(max_steps: usize) -> GumbelMctsConfig {
         max_considered_actions: NonZeroUsize::new(8).unwrap(),
         seed: 0,
         gumbel_scale: 0.0,
+        gumbel_noise_overlap: -1.0,
         c_visit: 50.0,
         c_scale: 1.0,
         temperature_moves: 0,
@@ -122,7 +123,7 @@ fn g1_multi_step_episode_golden() {
     assert_fingerprint(
         "g1",
         &episode_fingerprint(&episode),
-        "e52de2ef6b524635ddfef5a9a2abbddd282f774a4049005d2ecf8bf02e083a1e",
+        "7e08b43248c3889f36e2114731c5bb333ff8edb139a0c825b0a2a21095cfbd83",
     );
 }
 
@@ -166,7 +167,7 @@ fn g1_reuse_on_multi_step_episode_golden() {
     assert_fingerprint(
         "g1-reuse",
         &episode_fingerprint(&episode),
-        "838f73e7e6b37d2f1639b0d45cbc2dfa44ad25639a4ef428b0501a16724a5f33",
+        "a64e5fc8d93852a152aee329615b9005a695ae3f6c3c694024fba9645aff6fe6",
     );
 }
 
@@ -201,7 +202,7 @@ fn g2_temperature_episode_golden() {
     assert_fingerprint(
         "g2",
         &episode_fingerprint(&episode),
-        "24acfaf8ae0ecbe4d51800f5f05161c86b46f5346ee102baa83315807f191ffe",
+        "7f4cc2b55f89b6de24138bf4a5c5ec49b75c10b3be430dbaab6e3a34310b8a80",
     );
 }
 
@@ -230,7 +231,7 @@ fn g3_opponent_stop_reeval_episode_golden() {
     assert_fingerprint(
         "g3",
         &episode_fingerprint(&episode),
-        "0de49ceadf65d8354686eaf8d9df1454e7b5f3811add704c6e5c34f5fc8626a3",
+        "8d55eb9ff1892f21ce13ba5860d9e9152ba6fba739773dcfabb2abda97f8c6ff",
     );
 }
 
@@ -257,7 +258,7 @@ fn g4_rejected_candidate_episode_golden() {
     assert_fingerprint(
         "g4",
         &episode_fingerprint(&episode),
-        "e6dce677bd9a10ef1ef97d086c8fe723550355bd074be1d382d9bd84364471b0",
+        "bb7ea3b645f9ba7d12fb9d731dec2c20725f28160a71b8d957a4b4282e882f8c",
     );
 }
 
@@ -279,7 +280,7 @@ fn g5_zero_step_episode_golden() {
     assert_fingerprint(
         "g5",
         &episode_fingerprint(&episode),
-        "8e294a01054083cd2546103163796ddd80d755c42a4018a330f4e8f27fd16806",
+        "9aa89e5bf88364d62a1861532b6e2c6ed66175270294a667a65c9d1b3c6f7c28",
     );
 }
 

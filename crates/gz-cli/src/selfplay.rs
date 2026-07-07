@@ -43,6 +43,9 @@ pub struct SelfplayConfig {
     pub simulations: usize,
     pub max_considered: usize,
     pub gumbel_scale: f32,
+    /// Auto-temper root noise to the policy's sharpness (whittlezero's
+    /// overlap); negative disables and the fixed gumbel_scale applies.
+    pub gumbel_noise_overlap: f32,
     pub tree_reuse: bool,
     pub max_candidates: usize,
     pub max_batch: usize,
@@ -83,6 +86,7 @@ impl Default for SelfplayConfig {
             simulations: 8,
             max_considered: 16,
             gumbel_scale: 0.0,
+            gumbel_noise_overlap: -1.0,
             tree_reuse: true,
             max_candidates: WHITTLE_FEATURE_MAX_ENGINE_CANDIDATES,
             max_batch: 16,
@@ -130,6 +134,9 @@ impl SelfplayConfig {
         }
         if !self.gumbel_scale.is_finite() || self.gumbel_scale < 0.0 {
             return Err("--gumbel-scale must be zero or positive".to_owned());
+        }
+        if !self.gumbel_noise_overlap.is_finite() || self.gumbel_noise_overlap >= 1.0 {
+            return Err("--gumbel-noise-overlap must be < 1 (negative disables)".to_owned());
         }
         if !self.reference_ema_decay.is_finite()
             || self.reference_ema_decay <= 0.0
@@ -626,6 +633,7 @@ fn search(engine: &WhittleEngine, config: &SelfplayConfig) -> Result<GumbelMcts,
         max_considered_actions: nonzero(config.max_considered, "max_considered")?,
         seed: config.seed,
         gumbel_scale: config.gumbel_scale,
+        gumbel_noise_overlap: config.gumbel_noise_overlap,
         c_visit: 50.0,
         c_scale: 1.0,
         temperature_moves: 0,

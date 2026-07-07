@@ -70,6 +70,7 @@ fn config(max_steps: usize) -> GumbelMctsConfig {
         max_considered_actions: NonZeroUsize::new(8).unwrap(),
         seed: 0,
         gumbel_scale: 0.0,
+        gumbel_noise_overlap: -1.0,
         c_visit: 50.0,
         c_scale: 1.0,
         temperature_moves: 0,

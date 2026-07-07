@@ -31,6 +31,7 @@ impl GumbelMcts {
     #[must_use]
     pub fn new(config: GumbelMctsConfig) -> Self {
         assert!(config.gumbel_scale.is_finite() && config.gumbel_scale >= 0.0);
+        assert!(config.gumbel_noise_overlap.is_finite() && config.gumbel_noise_overlap < 1.0);
         assert!(config.c_visit.is_finite() && config.c_visit >= 0.0);
         assert!(config.c_scale.is_finite() && config.c_scale >= 0.0);
 
@@ -40,6 +41,7 @@ impl GumbelMcts {
             config.max_considered_actions.get(),
             config.seed,
             config.gumbel_scale,
+            config.gumbel_noise_overlap,
             config.c_visit,
             config.c_scale,
             config.temperature_moves,
@@ -72,6 +74,7 @@ impl GumbelMcts {
             simulations: NonZeroUsize::MIN,
             max_considered_actions: NonZeroUsize::MIN,
             gumbel_scale: 0.0,
+            gumbel_noise_overlap: -1.0,
             temperature_moves: 0,
             tree_reuse: false,
             mask_stop: true,
