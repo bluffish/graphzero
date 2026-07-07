@@ -72,6 +72,8 @@ class SelfplayConfig:
     python_dir: str = "python"
     # Export real position features to evals/rows; off = graph + opponent only.
     position_features: bool = True
+    # Evaluator server processes; lanes stripe across them (torch only).
+    eval_processes: int = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -672,6 +674,8 @@ def spawn_torch_selfplay(config: RunConfig) -> subprocess.Popen[bytes]:
             str(config.selfplay.reference_ema_decay),
             "--position-features",
             "true" if config.selfplay.position_features else "false",
+            "--eval-processes",
+            str(config.selfplay.eval_processes),
             "--evaluator",
             "torch",
             "--python-dir",

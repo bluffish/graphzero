@@ -68,6 +68,7 @@ fn replay_serve_returns_feature_batch_and_targets() {
         replay_backlog: None,
         replay_retain: None,
         position_features: true,
+        eval_processes: 1,
     })
     .unwrap();
     let expected_schema_config = ReplayStore::open(dir.path())
@@ -171,6 +172,7 @@ fn replay_serve_rejects_featureless_store() {
         replay_backlog: None,
         replay_retain: None,
         position_features: true,
+        eval_processes: 1,
     })
     .unwrap();
 
@@ -380,7 +382,7 @@ fn in_process_sample_service_serves_during_production() {
             gz_search::GumbelEpisodeContext::default(),
             FeaturizedRuntime {
                 extractors,
-                backend: StubBackend,
+                backends: vec![StubBackend],
             },
             ReplayRuntime {
                 store: &store,
@@ -440,7 +442,7 @@ fn live_backpressure_gates_production_until_the_consumer_drains() {
                 gz_search::GumbelEpisodeContext::default(),
                 FeaturizedRuntime {
                     extractors,
-                    backend: StubBackend,
+                    backends: vec![StubBackend],
                 },
                 ReplayRuntime {
                     store,
@@ -490,7 +492,7 @@ fn replay_serve_reacks_a_repeated_hello_on_a_live_connection() {
             gz_search::GumbelEpisodeContext::default(),
             FeaturizedRuntime {
                 extractors,
-                backend: StubBackend,
+                backends: vec![StubBackend],
             },
             ReplayRuntime {
                 store: &store,
@@ -539,7 +541,7 @@ fn serve_survives_a_failed_connection_and_accepts_the_next() {
             gz_search::GumbelEpisodeContext::default(),
             FeaturizedRuntime {
                 extractors,
-                backend: StubBackend,
+                backends: vec![StubBackend],
             },
             ReplayRuntime {
                 store: &store,

@@ -63,7 +63,11 @@ pub struct ReplayRuntime<'a, P> {
 
 pub struct FeaturizedRuntime<X, B> {
     pub extractors: Vec<X>,
-    pub backend: B,
+    /// One batcher thread per backend; lanes are assigned round-robin
+    /// (lane % backends.len()). Multiple evaluator processes parallelize
+    /// the per-batch host work (decode/stage/encode runs on one thread
+    /// per process) and keep the GPU's kernel queue dense.
+    pub backends: Vec<B>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -369,10 +373,18 @@ where
         }
         validate_engine_identities(&self.engines)?;
         let schema_hash = validate_feature_schemas::<E, X>(&featurized.extractors)?;
+        validate_backend_count(featurized.backends.len(), lanes)?;
 
         let workers_per_lane = self.config.workers_per_lane.get();
         let intake_capacity = lanes * workers_per_lane;
-        let (intake_tx, intake_rx) = sync_channel(intake_capacity);
+        let backend_count = featurized.backends.len();
+        let mut intake_txs = Vec::with_capacity(backend_count);
+        let mut intake_rxs = Vec::with_capacity(backend_count);
+        for _ in 0..backend_count {
+            let (tx, rx) = sync_channel(intake_capacity);
+            intake_txs.push(tx);
+            intake_rxs.push(rx);
+        }
         let mut reply_txs = Vec::with_capacity(lanes);
         let mut reply_rxs = Vec::with_capacity(lanes);
 
@@ -384,18 +396,26 @@ where
 
         let config = self.config;
         let search = &self.search;
-        let backend = featurized.backend;
+        let backends = featurized.backends;
         let extractors = featurized.extractors;
         let engines = self.engines;
         let feature_schema = first_schema::<E, X>(&extractors, schema_hash)?;
-        let collator = FeatureCollator::new(feature_schema, config.max_batch);
-        validate_collator_capacity(&collator, config)?;
+        validate_collator_capacity(
+            &FeatureCollator::new(feature_schema.clone(), config.max_batch),
+            config,
+        )?;
         let _ = self.evaluator;
 
-        let (batch_result, lane_results) = std::thread::scope(|scope| {
-            let batch_handle = scope.spawn(move || {
-                run_featurized_batcher(backend, collator, intake_rx, reply_txs, config)
-            });
+        let (batch_results, lane_results) = std::thread::scope(|scope| {
+            let mut batch_handles = Vec::with_capacity(backend_count);
+            for (backend, intake_rx) in backends.into_iter().zip(intake_rxs) {
+                let collator = FeatureCollator::new(feature_schema.clone(), config.max_batch);
+                let reply_txs = reply_txs.clone();
+                batch_handles.push(scope.spawn(move || {
+                    run_featurized_batcher(backend, collator, intake_rx, reply_txs, config)
+                }));
+            }
+            drop(reply_txs);
             let mut lane_handles = Vec::with_capacity(lanes);
 
             for (lane, (((engine, roots), extractor), reply_rx)) in engines
@@ -405,7 +425,7 @@ where
                 .zip(reply_rxs)
                 .enumerate()
             {
-                let intake_tx = intake_tx.clone();
+                let intake_tx = intake_txs[lane % backend_count].clone();
                 lane_handles.push(scope.spawn(move || {
                     run_lane_pipeline(
                         engine,
@@ -423,7 +443,7 @@ where
                 }));
             }
 
-            drop(intake_tx);
+            drop(intake_txs);
 
             let lane_results = lane_handles
                 .into_iter()
@@ -433,14 +453,22 @@ where
                         .unwrap_or_else(|_| Err(internal("worker blocked")))
                 })
                 .collect::<Vec<_>>();
-            let batch_result = batch_handle
-                .join()
-                .unwrap_or_else(|_| Err(internal("eval backend unavailable")));
+            let batch_results = batch_handles
+                .into_iter()
+                .map(|handle| {
+                    handle
+                        .join()
+                        .unwrap_or_else(|_| Err(internal("eval backend unavailable")))
+                })
+                .collect::<Vec<_>>();
 
-            (batch_result, lane_results)
+            (batch_results, lane_results)
         });
 
-        let batch_sizes = batch_result?;
+        let mut batch_sizes = Vec::new();
+        for result in batch_results {
+            batch_sizes.extend(result?);
+        }
         let mut lanes = Vec::with_capacity(lane_results.len());
 
         for result in lane_results {
@@ -472,10 +500,18 @@ where
         }
         validate_engine_identities(&self.engines)?;
         let schema_hash = validate_feature_schemas::<E, X>(&featurized.extractors)?;
+        validate_backend_count(featurized.backends.len(), lanes)?;
 
         let workers_per_lane = self.config.workers_per_lane.get();
         let intake_capacity = lanes * workers_per_lane;
-        let (intake_tx, intake_rx) = sync_channel(intake_capacity);
+        let backend_count = featurized.backends.len();
+        let mut intake_txs = Vec::with_capacity(backend_count);
+        let mut intake_rxs = Vec::with_capacity(backend_count);
+        for _ in 0..backend_count {
+            let (tx, rx) = sync_channel(intake_capacity);
+            intake_txs.push(tx);
+            intake_rxs.push(rx);
+        }
         let (replay_tx, replay_rx) = sync_channel(intake_capacity);
         let mut reply_txs = Vec::with_capacity(lanes);
         let mut reply_rxs = Vec::with_capacity(lanes);
@@ -488,7 +524,7 @@ where
 
         let config = self.config;
         let search = &self.search;
-        let backend = featurized.backend;
+        let backends = featurized.backends;
         let extractors = featurized.extractors;
         let engines = self.engines;
         let providers = replay.providers;
@@ -498,14 +534,22 @@ where
         store
             .ensure_feature_schema(feature_schema.config())
             .map_err(map_replay_error)?;
-        let collator = FeatureCollator::new(feature_schema, config.max_batch);
-        validate_collator_capacity(&collator, config)?;
+        validate_collator_capacity(
+            &FeatureCollator::new(feature_schema.clone(), config.max_batch),
+            config,
+        )?;
         let _ = self.evaluator;
 
-        let (batch_result, sink_result, lane_results) = std::thread::scope(|scope| {
-            let batch_handle = scope.spawn(move || {
-                run_featurized_batcher(backend, collator, intake_rx, reply_txs, config)
-            });
+        let (batch_results, sink_result, lane_results) = std::thread::scope(|scope| {
+            let mut batch_handles = Vec::with_capacity(backend_count);
+            for (backend, intake_rx) in backends.into_iter().zip(intake_rxs) {
+                let collator = FeatureCollator::new(feature_schema.clone(), config.max_batch);
+                let reply_txs = reply_txs.clone();
+                batch_handles.push(scope.spawn(move || {
+                    run_featurized_batcher(backend, collator, intake_rx, reply_txs, config)
+                }));
+            }
+            drop(reply_txs);
             let sink_handle = scope.spawn(move || run_replay_sink(store, replay_rx));
             let mut lane_handles = Vec::with_capacity(lanes);
 
@@ -517,7 +561,7 @@ where
                 .zip(reply_rxs)
                 .enumerate()
             {
-                let intake_tx = intake_tx.clone();
+                let intake_tx = intake_txs[lane % backend_count].clone();
                 let replay_tx = replay_tx.clone();
                 lane_handles.push(scope.spawn(move || {
                     run_lane_pipeline(
@@ -542,7 +586,7 @@ where
                 }));
             }
 
-            drop(intake_tx);
+            drop(intake_txs);
             drop(replay_tx);
 
             let lane_results = lane_handles
@@ -553,17 +597,25 @@ where
                         .unwrap_or_else(|_| Err(internal("worker blocked")))
                 })
                 .collect::<Vec<_>>();
-            let batch_result = batch_handle
-                .join()
-                .unwrap_or_else(|_| Err(internal("eval backend unavailable")));
+            let batch_results = batch_handles
+                .into_iter()
+                .map(|handle| {
+                    handle
+                        .join()
+                        .unwrap_or_else(|_| Err(internal("eval backend unavailable")))
+                })
+                .collect::<Vec<_>>();
             let sink_result = sink_handle
                 .join()
                 .unwrap_or_else(|_| Err(internal("replay sink failed")));
 
-            (batch_result, sink_result, lane_results)
+            (batch_results, sink_result, lane_results)
         });
 
-        let batch_sizes = batch_result?;
+        let mut batch_sizes = Vec::new();
+        for result in batch_results {
+            batch_sizes.extend(result?);
+        }
         let episodes_appended = sink_result?;
         let mut lanes = Vec::with_capacity(lane_results.len());
         let mut episodes_dropped = 0;
@@ -2037,6 +2089,16 @@ where
         return Err(internal("feature schema mismatch"));
     }
     Ok(schema.clone())
+}
+
+fn validate_backend_count(backends: usize, lanes: usize) -> EngineResult<()> {
+    if backends == 0 {
+        return Err(internal("no eval backends"));
+    }
+    if backends > lanes {
+        return Err(internal("more eval backends than lanes"));
+    }
+    Ok(())
 }
 
 fn validate_collator_capacity(

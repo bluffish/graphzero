@@ -58,6 +58,10 @@ pub struct SelfplayConfig {
     /// Export real position features to evals and rows (default). Off
     /// conditions the model on graph + opponent alone.
     pub position_features: bool,
+    /// Evaluator processes to spawn and stripe lanes across (featurized
+    /// evaluators only). Each process parallelizes per-batch host work
+    /// on its own interpreter and keeps the GPU kernel queue dense.
+    pub eval_processes: usize,
 }
 
 impl Default for SelfplayConfig {
@@ -88,6 +92,7 @@ impl Default for SelfplayConfig {
             replay_backlog: None,
             replay_retain: None,
             position_features: true,
+            eval_processes: 1,
         }
     }
 }
@@ -169,6 +174,20 @@ impl SelfplayConfig {
         }
         if self.serve_max_batch == 0 {
             return Err("--serve-max-batch must be greater than zero".to_owned());
+        }
+        if self.eval_processes == 0 {
+            return Err("--eval-processes must be greater than zero".to_owned());
+        }
+        if self.eval_processes > 1
+            && !matches!(
+                self.evaluator,
+                EvaluatorMode::ProcessStub | EvaluatorMode::Torch
+            )
+        {
+            return Err("--eval-processes requires --evaluator process-stub|torch".to_owned());
+        }
+        if self.eval_processes > self.lanes {
+            return Err("--eval-processes cannot exceed --lanes".to_owned());
         }
         if self.replay_backlog == Some(0) {
             return Err("--replay-backlog must be greater than zero".to_owned());
@@ -426,7 +445,7 @@ fn run_stub(
             GumbelEpisodeContext::default(),
             FeaturizedRuntime {
                 extractors,
-                backend: StubBackend,
+                backends: vec![StubBackend],
             },
             ReplayRuntime {
                 store: &store,
@@ -451,20 +470,26 @@ fn run_process(
         .iter()
         .map(|engine| feature_extractor(engine, &config))
         .collect::<Vec<_>>();
-    let mut process = EvaluatorProcess::spawn(EvaluatorProcessConfig {
-        working_dir: config
-            .python_dir
-            .clone()
-            .unwrap_or_else(|| PathBuf::from("python")),
-        socket_path: process_socket_path(),
-        ready_timeout: Duration::from_secs(10),
-        // Generous: a tripped eval timeout kills the whole selfplay run,
-        // and warm-up/compile stalls on the evaluator are legitimate.
-        io_timeout: Duration::from_secs(300),
-        extra_args: config.evaluator_extra_args(),
-        ..EvaluatorProcessConfig::default()
-    })
-    .map_err(|error| error.to_string())?;
+    let mut processes = Vec::with_capacity(config.eval_processes);
+    for index in 0..config.eval_processes {
+        processes.push(
+            EvaluatorProcess::spawn(EvaluatorProcessConfig {
+                working_dir: config
+                    .python_dir
+                    .clone()
+                    .unwrap_or_else(|| PathBuf::from("python")),
+                socket_path: process_socket_path(index),
+                ready_timeout: Duration::from_secs(10),
+                // Generous: a tripped eval timeout kills the whole selfplay
+                // run, and warm-up/compile stalls on the evaluator are
+                // legitimate.
+                io_timeout: Duration::from_secs(300),
+                extra_args: config.evaluator_extra_args(),
+                ..EvaluatorProcessConfig::default()
+            })
+            .map_err(|error| error.to_string())?,
+        );
+    }
     let hello = Hello::new(
         extractors
             .first()
@@ -476,8 +501,11 @@ fn run_process(
         engines[0].engine_version(),
         engines[0].action_set_hash(),
     );
-    let backend = process.connect(&hello).map_err(|error| error.to_string())?;
-    let model_version = backend.model_version();
+    let mut backends = Vec::with_capacity(processes.len());
+    for process in &mut processes {
+        backends.push(process.connect(&hello).map_err(|error| error.to_string())?);
+    }
+    let model_version = backends[0].model_version();
     let orchestrator = ThreadedGumbelOrchestrator::new(
         engines,
         random_placeholder(&config)?,
@@ -490,7 +518,7 @@ fn run_process(
             GumbelEpisodeContext::default(),
             FeaturizedRuntime {
                 extractors,
-                backend,
+                backends,
             },
             ReplayRuntime {
                 store: &store,
@@ -499,7 +527,9 @@ fn run_process(
             },
         )
         .map_err(|error| error.to_string())?;
-    wait_for_process_exit(&mut process)?;
+    for process in &mut processes {
+        wait_for_process_exit(process)?;
+    }
 
     summarize(&store, run, config.evaluator, Some(model_version))
 }
@@ -563,8 +593,11 @@ fn random_placeholder(config: &SelfplayConfig) -> Result<RandomValueEvaluator, S
     .map_err(|error| error.to_string())
 }
 
-fn process_socket_path() -> PathBuf {
-    std::env::temp_dir().join(format!("gz-process-stub-{}.sock", std::process::id()))
+fn process_socket_path(index: usize) -> PathBuf {
+    std::env::temp_dir().join(format!(
+        "gz-process-stub-{}-{index}.sock",
+        std::process::id()
+    ))
 }
 
 fn wait_for_process_exit(process: &mut EvaluatorProcess) -> Result<(), String> {

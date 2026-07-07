@@ -133,7 +133,7 @@ fn featurized_replay_appends_rows() {
             GumbelEpisodeContext::default(),
             FeaturizedRuntime {
                 extractors,
-                backend: StubBackend,
+                backends: vec![StubBackend],
             },
             ReplayRuntime {
                 store: &store,
@@ -185,7 +185,7 @@ fn featurized_replay_unlabeled_rows_have_no_opponent_scalar() {
             GumbelEpisodeContext::default(),
             FeaturizedRuntime {
                 extractors,
-                backend: StubBackend,
+                backends: vec![StubBackend],
             },
             ReplayRuntime {
                 store: &store,
@@ -234,7 +234,7 @@ fn featurized_replay_schema_error_includes_replay_detail() {
             GumbelEpisodeContext::default(),
             FeaturizedRuntime {
                 extractors,
-                backend: StubBackend,
+                backends: vec![StubBackend],
             },
             ReplayRuntime {
                 store: &store,
@@ -260,7 +260,7 @@ fn featurized_rejects_lane_and_schema_mismatches() {
             GumbelEpisodeContext::default(),
             FeaturizedRuntime {
                 extractors: extractor_set,
-                backend: StubBackend,
+                backends: vec![StubBackend],
             },
         )
         .unwrap_err();
@@ -285,7 +285,7 @@ fn featurized_rejects_lane_and_schema_mismatches() {
             GumbelEpisodeContext::default(),
             FeaturizedRuntime {
                 extractors: wrapped,
-                backend: StubBackend,
+                backends: vec![StubBackend],
             },
         )
         .unwrap_err();
@@ -307,7 +307,7 @@ fn featurized_extraction_failure_aborts_run() {
             GumbelEpisodeContext::default(),
             FeaturizedRuntime {
                 extractors,
-                backend: StubBackend,
+                backends: vec![StubBackend],
             },
         )
         .unwrap_err();
@@ -331,7 +331,7 @@ fn run_stub(
             GumbelEpisodeContext::default(),
             FeaturizedRuntime {
                 extractors,
-                backend: StubBackend,
+                backends: vec![StubBackend],
             },
         )
         .unwrap()

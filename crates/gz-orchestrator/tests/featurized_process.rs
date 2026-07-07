@@ -107,7 +107,7 @@ where
             GumbelEpisodeContext::default(),
             FeaturizedRuntime {
                 extractors,
-                backend,
+                backends: vec![backend],
             },
         )
         .unwrap()
