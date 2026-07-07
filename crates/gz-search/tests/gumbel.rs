@@ -76,6 +76,7 @@ fn config(max_steps: usize) -> GumbelMctsConfig {
         tree_reuse: false,
         export_position: true,
         mask_stop: false,
+        no_backtrack: false,
         candidate_options: gz_engine::CandidateOptions::default(),
         measure_options: measure_options(),
     }
@@ -459,4 +460,96 @@ fn tree_reuse_stop_selection_completes_cleanly() {
 
     assert_eq!(episode.stop_reason, GumbelStopReason::SelectedStop);
     assert_eq!(episode.final_graph, 0);
+}
+
+#[test]
+fn no_backtrack_masks_actions_that_revisit_episode_roots() {
+    // 0 -> 10 via candidate 1; from 10, candidate 3 returns to 0 and
+    // dominates the eval policy while candidate 4 advances to 20.
+    let build_engine = || {
+        TestEngine::new()
+            .candidates(0, [1, 2])
+            .candidates(10, [3, 4])
+            .candidates(20, [])
+            .candidates(30, [])
+            .apply(0, 1, 10)
+            .apply(0, 2, 30)
+            .apply(10, 3, 0)
+            .apply(10, 4, 20)
+            .reward(0, 0.0)
+            .reward(20, 20.0)
+    };
+    let build_evaluator = || {
+        RecordedEvaluator::default()
+            .row(0, [10.0, -10.0, -20.0], 0.0)
+            .row(10, [10.0, 0.0, -20.0], 0.0)
+            .row(20, [0.0], 0.0)
+    };
+
+    let mut engine = build_engine();
+    let episode = GumbelMcts::new(config(2))
+        .run(
+            &mut engine,
+            &mut build_evaluator(),
+            0,
+            GumbelEpisodeContext::default(),
+        )
+        .unwrap();
+    assert_eq!(episode.final_graph, 0, "control episode revisits the start");
+
+    for reuse in [false, true] {
+        let mut cfg = config(2);
+        cfg.no_backtrack = true;
+        cfg.tree_reuse = reuse;
+        cfg.simulations = NonZeroUsize::new(2).unwrap();
+        let mut engine = build_engine();
+        let episode = GumbelMcts::new(cfg)
+            .run(
+                &mut engine,
+                &mut build_evaluator(),
+                0,
+                GumbelEpisodeContext::default(),
+            )
+            .unwrap();
+
+        // The backtracking action is masked out of the selection and gets
+        // zero mass in the stored policy target (candidate order [3, 4]).
+        assert!(
+            matches!(episode.steps[1].action, SearchAction::Candidate(4)),
+            "reuse={reuse}"
+        );
+        assert_eq!(episode.final_graph, 20, "reuse={reuse}");
+        assert_eq!(episode.steps[1].policy_target[0], 0.0, "reuse={reuse}");
+    }
+}
+
+#[test]
+fn no_backtrack_collapses_to_stop_when_every_rewrite_revisits() {
+    let mut engine = TestEngine::new()
+        .candidates(0, [1])
+        .candidates(10, [3])
+        .apply(0, 1, 10)
+        .apply(10, 3, 0)
+        .reward(10, 10.0);
+    let mut evaluator =
+        RecordedEvaluator::default()
+            .row(0, [10.0, -10.0], 0.0)
+            .row(10, [10.0, -10.0], 0.0);
+    let mut cfg = config(3);
+    cfg.no_backtrack = true;
+
+    let episode = GumbelMcts::new(cfg)
+        .run(
+            &mut engine,
+            &mut evaluator,
+            0,
+            GumbelEpisodeContext::default(),
+        )
+        .unwrap();
+
+    // The only rewrite at graph 10 returns to the start: it is masked, so
+    // the policy target collapses onto STOP and the episode ends there.
+    assert!(matches!(episode.steps[1].action, SearchAction::Stop));
+    assert_eq!(episode.final_graph, 10);
+    assert_eq!(episode.stop_reason, GumbelStopReason::SelectedStop);
 }

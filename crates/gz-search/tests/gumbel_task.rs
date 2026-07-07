@@ -24,6 +24,7 @@ fn config(max_steps: usize) -> GumbelMctsConfig {
         tree_reuse: false,
         export_position: true,
         mask_stop: false,
+        no_backtrack: false,
         candidate_options: CandidateOptions::default(),
         measure_options: measure_options(),
     }

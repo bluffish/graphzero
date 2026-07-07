@@ -68,6 +68,7 @@ fn replay_serve_returns_feature_batch_and_targets() {
         replay_backlog: None,
         replay_retain: None,
         position_features: true,
+        no_backtrack: false,
         eval_processes: 1,
     })
     .unwrap();
@@ -172,6 +173,7 @@ fn replay_serve_rejects_featureless_store() {
         replay_backlog: None,
         replay_retain: None,
         position_features: true,
+        no_backtrack: false,
         eval_processes: 1,
     })
     .unwrap();
@@ -282,6 +284,7 @@ fn live_setup(
         tree_reuse: false,
         export_position: true,
         mask_stop: false,
+        no_backtrack: false,
         candidate_options: gz_engine::CandidateOptions {
             max_candidates: Some(255),
             deterministic_order: true,

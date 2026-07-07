@@ -58,6 +58,10 @@ pub struct SelfplayConfig {
     /// Export real position features to evals and rows (default). Off
     /// conditions the model on graph + opponent alone.
     pub position_features: bool,
+    /// Mask search actions that revisit the current or a prior episode
+    /// root (whittlezero's no_backtrack). Learner search only; reference
+    /// rollouts stay plain greedy.
+    pub no_backtrack: bool,
     /// Evaluator processes to spawn and stripe lanes across (featurized
     /// evaluators only). Each process parallelizes per-batch host work
     /// on its own interpreter and keeps the GPU kernel queue dense.
@@ -92,6 +96,7 @@ impl Default for SelfplayConfig {
             replay_backlog: None,
             replay_retain: None,
             position_features: true,
+            no_backtrack: false,
             eval_processes: 1,
         }
     }
@@ -627,6 +632,7 @@ fn search(engine: &WhittleEngine, config: &SelfplayConfig) -> Result<GumbelMcts,
         tree_reuse: config.tree_reuse,
         export_position: config.position_features,
         mask_stop: false,
+        no_backtrack: config.no_backtrack,
         candidate_options: match config.evaluator {
             EvaluatorMode::Random => CandidateOptions::default(),
             EvaluatorMode::Stub | EvaluatorMode::ProcessStub | EvaluatorMode::Torch => {

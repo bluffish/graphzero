@@ -77,6 +77,7 @@ fn config(max_steps: usize) -> GumbelMctsConfig {
         tree_reuse: false,
         export_position: true,
         mask_stop: false,
+        no_backtrack: false,
         candidate_options: gz_engine::CandidateOptions::default(),
         measure_options: measure_options(),
     }
@@ -121,7 +122,7 @@ fn g1_multi_step_episode_golden() {
     assert_fingerprint(
         "g1",
         &episode_fingerprint(&episode),
-        "1da22907d7034b157b196d868df9f715c32377c3adb1743734e3248c03d65f70",
+        "e52de2ef6b524635ddfef5a9a2abbddd282f774a4049005d2ecf8bf02e083a1e",
     );
 }
 
@@ -165,7 +166,7 @@ fn g1_reuse_on_multi_step_episode_golden() {
     assert_fingerprint(
         "g1-reuse",
         &episode_fingerprint(&episode),
-        "5a7c212ae36e82b85ef60517369e6e5058ab375d85bbd5943ac35896faed3011",
+        "838f73e7e6b37d2f1639b0d45cbc2dfa44ad25639a4ef428b0501a16724a5f33",
     );
 }
 
@@ -200,7 +201,7 @@ fn g2_temperature_episode_golden() {
     assert_fingerprint(
         "g2",
         &episode_fingerprint(&episode),
-        "3497cf8beef2329390f1eaad961da8df59ab46a7f5b5b9a19a9cf72da9dfde0e",
+        "24acfaf8ae0ecbe4d51800f5f05161c86b46f5346ee102baa83315807f191ffe",
     );
 }
 
@@ -229,7 +230,7 @@ fn g3_opponent_stop_reeval_episode_golden() {
     assert_fingerprint(
         "g3",
         &episode_fingerprint(&episode),
-        "87ba629773b5cdf700070fbf237c26308ed5ba1ed6f566d768b7bc48e2bb5316",
+        "0de49ceadf65d8354686eaf8d9df1454e7b5f3811add704c6e5c34f5fc8626a3",
     );
 }
 
@@ -256,7 +257,7 @@ fn g4_rejected_candidate_episode_golden() {
     assert_fingerprint(
         "g4",
         &episode_fingerprint(&episode),
-        "3e9cab4a838517a76d88a52f63a23c1df6f5eb750944265c69b5a8f625387e59",
+        "e6dce677bd9a10ef1ef97d086c8fe723550355bd074be1d382d9bd84364471b0",
     );
 }
 
@@ -278,7 +279,7 @@ fn g5_zero_step_episode_golden() {
     assert_fingerprint(
         "g5",
         &episode_fingerprint(&episode),
-        "188bd9c187345eb57141165dae69f0bf9d404cc25306add35a05fe01df804309",
+        "8e294a01054083cd2546103163796ddd80d755c42a4018a330f4e8f27fd16806",
     );
 }
 

@@ -29,6 +29,7 @@ fn main() -> gz_engine::EngineResult<()> {
         tree_reuse: false,
         export_position: true,
         mask_stop: false,
+        no_backtrack: false,
         candidate_options: CandidateOptions::default(),
         measure_options: engine.measure_options(),
     });

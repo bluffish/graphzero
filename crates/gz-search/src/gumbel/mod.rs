@@ -45,6 +45,7 @@ impl GumbelMcts {
             config.temperature_moves,
             config.tree_reuse,
             config.mask_stop,
+            config.no_backtrack,
             config.candidate_options,
             config.measure_options,
         );
@@ -74,6 +75,9 @@ impl GumbelMcts {
             temperature_moves: 0,
             tree_reuse: false,
             mask_stop: true,
+            // The reference is a plain greedy rollout (whittlezero's
+            // policy_rollout has no revisit masking either).
+            no_backtrack: false,
             ..self.config
         })
     }

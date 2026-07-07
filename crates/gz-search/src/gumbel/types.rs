@@ -30,6 +30,13 @@ pub struct GumbelMctsConfig {
     /// bar at root cost (whittlezero's rollouts exclude STOP the same
     /// way). Part of the search config hash.
     pub mask_stop: bool,
+    /// Mask any action whose applied child is the current root or a
+    /// prior root of this episode (whittlezero's no_backtrack): the
+    /// search must find genuinely new states, and a root where every
+    /// rewrite revisits history collapses the policy target onto STOP.
+    /// Within-simulation cycles are already handled by the descent seen
+    /// set. Part of the search config hash.
+    pub no_backtrack: bool,
     pub candidate_options: CandidateOptions,
     pub measure_options: MeasureOptions,
 }

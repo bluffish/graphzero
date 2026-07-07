@@ -73,6 +73,8 @@ class SelfplayConfig:
     python_dir: str = "python"
     # Export real position features to evals/rows; off = graph + opponent only.
     position_features: bool = True
+    # Mask search actions that revisit the current or a prior episode root.
+    no_backtrack: bool = False
     # Evaluator server processes; lanes stripe across them (torch only).
     eval_processes: int = 1
 
@@ -676,6 +678,8 @@ def spawn_torch_selfplay(config: RunConfig) -> subprocess.Popen[bytes]:
             str(config.selfplay.reference_ema_decay),
             "--position-features",
             "true" if config.selfplay.position_features else "false",
+            "--no-backtrack",
+            "true" if config.selfplay.no_backtrack else "false",
             "--eval-processes",
             str(config.selfplay.eval_processes),
             "--evaluator",

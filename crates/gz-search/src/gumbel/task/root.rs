@@ -26,6 +26,10 @@ pub struct GumbelRootTask<G, C> {
     root: G,
     pub(super) context: GumbelSearchContext,
     pub(super) root_context: Option<ReplayGraphContext>,
+    /// Prior episode roots (no_backtrack): applied children matching one
+    /// of these are masked. The current root is checked separately via
+    /// root_context. Empty unless the episode task installs it.
+    visited: HashSet<ReplayGraphContext>,
     pub(super) tree: Tree<G, C>,
     pub(super) next_token: u64,
     pending: Option<PendingRootWork<G, C>>,
@@ -49,6 +53,7 @@ where
             root,
             context,
             root_context: None,
+            visited: HashSet::new(),
             tree: Tree::new(search, context),
             next_token: 0,
             pending: None,
@@ -59,6 +64,10 @@ where
                 run: None,
             },
         }
+    }
+
+    pub(super) fn set_visited(&mut self, visited: HashSet<ReplayGraphContext>) {
+        self.visited = visited;
     }
 
     pub(super) fn reused_child_task(
@@ -82,6 +91,7 @@ where
             root,
             context,
             root_context: Some(root_context),
+            visited: HashSet::new(),
             tree,
             next_token: 0,
             pending: None,
@@ -444,13 +454,22 @@ where
             return Ok(());
         }
 
+        let child_context = self.identity.context(applied.after_hash);
+        self.tree.portable_contexts += 1;
+
+        if self.config.no_backtrack
+            && (self.root_context == Some(child_context) || self.visited.contains(&child_context))
+        {
+            self.tree.mask_action(descent.node_index, action);
+            run.descent = Some(descent);
+            self.state = RootTaskState::Running(run);
+            return Ok(());
+        }
+
         descent.path.push(Edge {
             node_index: descent.node_index,
             action,
         });
-
-        let child_context = self.identity.context(applied.after_hash);
-        self.tree.portable_contexts += 1;
 
         if let Some(child) = self.tree.nodes[descent.node_index].children[action] {
             if !descent.seen.insert(self.tree.nodes[child].context) {

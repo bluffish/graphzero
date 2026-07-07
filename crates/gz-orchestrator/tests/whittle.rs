@@ -45,6 +45,7 @@ fn search(engine: &WhittleEngine) -> GumbelMcts {
         tree_reuse: false,
         export_position: true,
         mask_stop: false,
+        no_backtrack: false,
         candidate_options: gz_engine::CandidateOptions::default(),
         measure_options: engine.measure_options(),
     })

@@ -1,0 +1,66 @@
+# The full whittlezero-mechanics stack plus no_backtrack: search
+# actions whose applied child revisits the current or a prior episode
+# root are masked, so episodes must find genuinely new states and a
+# fully-revisiting root collapses onto STOP. Reference rollouts stay
+# plain greedy. Single-variable A/B against noema-gated-sage-tanh
+# (label -0.50, terminal 112, best 97 at 5k).
+
+[arch]
+dim = 128
+layers = 3
+heads = 4
+ffn_dim = 512
+dropout = 0.1
+trunk = "sage"
+sage_layers = 3
+policy_head = "pointer"
+value_input = "pair"
+value_activation = "tanh"
+
+[trainer]
+lr = 0.0003
+lr_schedule = "constant"
+warmup_steps = 2000
+batch = 256
+window_rows = 50000
+total_steps = 5000
+publish_interval = 32
+value_weight = 1.0
+ema_decay = 0.0
+grad_clip = 1.0
+min_startup_rows = 8192
+seed = 42
+device = "cuda:1"
+startup_timeout = 600.0
+reconnect_limit = 5
+log_interval = 10
+step_sleep = 0.0
+bootstrap_episodes = 128
+
+[selfplay]
+lanes = 44
+workers_per_lane = 48
+simulations = 48
+max_considered = 8
+gumbel_scale = 1.0
+max_steps = 128
+max_candidates = 1023
+no_backtrack = true
+reference = "gated-policy"
+root_mode = "fixed"
+reference_ema_decay = 0.99
+max_row_backlog = 1000000
+replay_retain = 150000
+eval_device = "cuda:0"
+eval_poll_interval = 2.0
+seed = 42
+max_batch = 256
+python_dir = "python"
+
+[wandb]
+project = "graphzero"
+run_name = "whittle-1024-pub32-5k-noema-gated-sage-tanh-nbt-1"
+
+[paths]
+run_dir = "runs/whittle-1024-pub32-5k-noema-gated-sage-tanh-nbt"
+graphzero_bin = "target/release/graphzero"

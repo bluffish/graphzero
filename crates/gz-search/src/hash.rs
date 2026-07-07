@@ -55,6 +55,7 @@ pub fn gumbel_search_config_hash(
     temperature_moves: usize,
     tree_reuse: bool,
     mask_stop: bool,
+    no_backtrack: bool,
     candidate_options: CandidateOptions,
     measure_options: MeasureOptions,
 ) -> SearchConfigHash {
@@ -62,7 +63,8 @@ pub fn gumbel_search_config_hash(
     // v3: reused roots credit carried visits against the simulation
     // budget (semantics change without a config-shape change).
     // v4: mask_stop joins the config shape.
-    update_chunk(&mut hasher, b"gz-search-gumbel-mcts-v4");
+    // v5: no_backtrack joins the config shape.
+    update_chunk(&mut hasher, b"gz-search-gumbel-mcts-v5");
     update_u64(&mut hasher, max_steps as u64);
     update_u64(&mut hasher, simulations as u64);
     update_u64(&mut hasher, max_considered_actions as u64);
@@ -73,6 +75,7 @@ pub fn gumbel_search_config_hash(
     update_u64(&mut hasher, temperature_moves as u64);
     update_bool(&mut hasher, tree_reuse);
     update_bool(&mut hasher, mask_stop);
+    update_bool(&mut hasher, no_backtrack);
     update_candidate_options(&mut hasher, candidate_options);
     update_measure_options(&mut hasher, measure_options);
     SearchConfigHash::from_bytes(*hasher.finalize().as_bytes())

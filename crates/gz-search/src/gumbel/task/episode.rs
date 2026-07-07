@@ -10,7 +10,7 @@ use crate::work::{
     EngineIdentity, MeasureWork, SearchPoll, SearchWork, SearchWorkResult, WorkToken,
 };
 use gz_engine::{EngineResult, ReplayGraphContext, SearchConfigHash};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::hash::Hash;
 
 pub struct GumbelEpisodeTask<G, C> {
@@ -24,6 +24,9 @@ pub struct GumbelEpisodeTask<G, C> {
     root_context: Option<ReplayGraphContext>,
     steps: Vec<GumbelStep<G, C>>,
     root_stats: Vec<GumbelRootStats>,
+    /// Contexts of all completed roots (no_backtrack): installed on each
+    /// move's root task so revisits of episode history are masked.
+    visited: HashSet<ReplayGraphContext>,
     path_graphs: Vec<G>,
     move_graphs: Vec<G>,
     move_candidates: Vec<C>,
@@ -63,6 +66,7 @@ where
             root_context: None,
             steps: Vec::new(),
             root_stats: Vec::new(),
+            visited: HashSet::new(),
             path_graphs: Vec::new(),
             move_graphs: Vec::new(),
             move_candidates: Vec::new(),
@@ -246,7 +250,7 @@ where
 
     fn root_task_at(&self, step_index: usize, root: G) -> GumbelRootTask<G, C> {
         let root_step = step_index as u32;
-        GumbelRootTask::new(
+        let mut task = GumbelRootTask::new(
             &GumbelMcts {
                 config: self.config,
                 search_config_hash: self.search_config_hash,
@@ -266,7 +270,11 @@ where
                 opponent: self.context.opponent,
                 export_position: self.config.export_position,
             },
-        )
+        );
+        if self.config.no_backtrack {
+            task.set_visited(self.visited.clone());
+        }
+        task
     }
 
     fn reused_root_task(
@@ -332,10 +340,19 @@ where
         self.root_stats.push(result.stats);
         self.step_index += 1;
 
+        if self.config.no_backtrack {
+            self.visited.insert(result.root_context);
+        }
         let (reused_root, carried) = match reused_root {
             Some(reused) => (Some(reused.task), reused.handles),
             None => (None, GumbelHandleBatch::default()),
         };
+        let reused_root = reused_root.map(|mut task| {
+            if self.config.no_backtrack {
+                task.set_visited(self.visited.clone());
+            }
+            task
+        });
         self.partition_move_handles(&carried, selected_graph);
 
         if selected_stop {
