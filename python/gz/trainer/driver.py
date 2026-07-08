@@ -87,6 +87,10 @@ class SelfplayConfig:
     # Fraction of episodes referenced against the latest rollout instead
     # of the gated best (whittlezero's ptp.gamma; gated-policy only).
     reference_gamma: float = 0.0
+    # Carry the selected subtree across moves. whittlezero searches a
+    # fresh tree per move; visit-based final selection is only faithful
+    # with reuse off.
+    tree_reuse: bool = True
     # Evaluator server processes; lanes stripe across them (torch only).
     eval_processes: int = 1
 
@@ -715,6 +719,8 @@ def spawn_torch_selfplay(config: RunConfig) -> subprocess.Popen[bytes]:
             "true" if config.selfplay.no_backtrack else "false",
             "--gumbel-noise-overlap",
             str(config.selfplay.gumbel_noise_overlap),
+            "--tree-reuse",
+            "true" if config.selfplay.tree_reuse else "false",
             "--mask-stop",
             "true" if config.selfplay.mask_stop else "false",
             "--eval-processes",

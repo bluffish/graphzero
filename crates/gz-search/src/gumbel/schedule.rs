@@ -80,13 +80,14 @@ pub(super) fn selectable_root_actions<G, C>(node: &Node<G, C>, considered: &[usi
     actions
 }
 
-pub(super) fn best_score_action(considered: &[usize], scores: &[f32]) -> usize {
+pub(super) fn best_count_action(visits: &[u32], considered: &[usize], scores: &[f32]) -> usize {
     considered
         .iter()
         .copied()
         .max_by(|&left, &right| {
-            scores[left]
-                .total_cmp(&scores[right])
+            visits[left]
+                .cmp(&visits[right])
+                .then_with(|| scores[left].total_cmp(&scores[right]))
                 .then_with(|| right.cmp(&left))
         })
         .expect("considered actions is non-empty")

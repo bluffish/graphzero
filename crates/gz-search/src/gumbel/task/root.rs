@@ -1,5 +1,5 @@
 use super::super::schedule::{
-    best_eligible, best_score_action, root_q_max, sample_count_action, search_value,
+    best_count_action, best_eligible, root_q_max, sample_count_action, search_value,
     selectable_root_actions, softmax,
 };
 use super::super::tree::{Edge, Node, Tree};
@@ -574,30 +574,18 @@ where
         let root_scores = self.tree.root_scores(root_index, &run.base_scores);
         let policy_target = self.tree.improved_policy(root_index);
         let selectable = selectable_root_actions(root_node, &run.considered);
-        // Final selection is the score argmax, not the visit-count proxy:
-        // under tree reuse, budget crediting caps fresh simulations, so a
-        // carried favorite's visit total can never be outvoted even when
-        // fresh evals refute its Q (and counting only fresh visits has
-        // the opposite bias -- halving's eligibility gate deliberately
-        // starves the carried favorite of fresh visits). The score folds
-        // carried Q, fresh evidence, priors, and this move's Gumbel draw
-        // with the weights halving itself optimizes for.
-        // Only actions with a known outcome are playable: STOP, or a
-        // child some simulation actually applied (the visit-count proxy
-        // guaranteed this implicitly).
-        let playable: Vec<usize> = selectable
-            .iter()
-            .copied()
-            .filter(|&action| root_node.is_stop(action) || root_node.children[action].is_some())
-            .collect();
-        if playable.is_empty() {
-            return Err(internal("no simulated root action to select"));
-        }
-        let fallback = best_score_action(&playable, &root_scores);
+        // whittlezero's rule: the most-visited considered action, score
+        // tie-break -- winning the halving is an implicit consolidation
+        // filter (a raw score argmax plays 1-visit actions with lucky Q
+        // samples, which measurably sends weak-net episodes wandering).
+        // Correct only on fresh trees: carried visits freeze the previous
+        // move's preference, so whittlezero-faithful selection requires
+        // tree_reuse off.
+        let fallback = best_count_action(&root_node.visits, &selectable, &root_scores);
         let selected = if self.context.selection_temperature > 0.0 {
             sample_count_action(
                 &mut run.rng,
-                &self.tree.fresh_root_visits(),
+                &root_node.visits,
                 &selectable,
                 self.context.selection_temperature,
                 fallback,
