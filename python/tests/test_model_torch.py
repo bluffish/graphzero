@@ -259,6 +259,26 @@ def tensors_of(schema: FeatureSchemaConfig, view: BatchView):
     return BatchStager(schema, view.batch_capacity, "cpu").copy(view)
 
 
+def test_value_mirror_returns_both_orientations() -> None:
+    view = BatchView.parse(make_batch(attr_dim=1))
+    schema = schema_for_view(view, node_vocab_size=7, edge_type_count=2, action_kind_vocab_size=8)
+    arch = ArchConfig(dim=16, layers=1, heads=4, ffn_dim=32, dropout=0.0, value_input="pair")
+    model = build_model(schema, arch).eval()
+    tensors = tensors_of(schema, view)
+    with torch.no_grad():
+        mirrored, _ = model(tensors, value_mirror=True)
+        canonical, _ = model(tensors)
+
+    assert mirrored.shape[0] == 2
+    torch.testing.assert_close(mirrored[0], canonical, rtol=0, atol=0)
+    # The swapped orientation equals canonical exactly when self and
+    # opponent readouts coincide; on real batches they differ per row
+    # only where an opponent state is present.
+    present = tensors.opponent_state_present > 0
+    if bool(present.any()):
+        assert not torch.equal(mirrored[1][present], mirrored[0][present])
+
+
 def test_sage_trunk_arch_round_trip_and_legacy_defaults() -> None:
     arch = make_arch("sage")
     assert ArchConfig.from_dict(arch.to_dict()) == arch

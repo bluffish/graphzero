@@ -50,6 +50,9 @@ class TrainerConfig:
     # per produced row (whittlezero's generate-then-train ratio is ~0.55;
     # our free-running loop measured 7-18). 0 disables.
     max_reuse: float = 0.0
+    # Train both orientations of every pair (whittlezero's mirrored value
+    # stream) instead of the random per-step flip.
+    value_mirror: bool = False
     # Continue an interrupted run in place: skip bootstrap, load the latest
     # published checkpoint (EMA weights seed both the live model and the
     # EMA -- an approximate resume; optimizer moments restart), and start
@@ -239,6 +242,7 @@ def run(config_path: str | Path) -> None:
                 weight_decay=config.trainer.weight_decay,
                 grad_clip=config.trainer.grad_clip,
                 run_seed=config.trainer.seed,
+                value_mirror=config.trainer.value_mirror,
             ),
         )
         loop.step_index = resume_start

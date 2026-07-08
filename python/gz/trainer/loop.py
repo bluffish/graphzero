@@ -17,6 +17,9 @@ class LoopConfig:
     grad_clip: float = 1.0
     weight_decay: float = 0.01
     run_seed: int = 0
+    # Train both orientations of every pair (targets z and -z) instead of
+    # a random per-step flip: whittlezero's mirrored value stream.
+    value_mirror: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,18 +63,40 @@ class TrainerLoop:
             dtype=torch.bfloat16,
             enabled=self.device_type == "cuda",
         ):
+            pair_mode = getattr(getattr(self.model, "arch", None), "value_input", None) == "pair"
+            mirror = self.config.value_mirror and pair_mode
             value_flip = None
-            if getattr(getattr(self.model, "arch", None), "value_input", None) == "pair":
+            if pair_mode and not mirror:
                 value_flip = pair_value_flip(torch, batch, self.config.run_seed, self.step_index)
-            value_raw, logits = self.model(batch.features, value_flip=value_flip)
+            value_raw, logits = self.model(
+                batch.features, value_flip=value_flip, value_mirror=mirror
+            )
             policy_loss = policy_ce_loss(
                 logits, batch.policy, batch.features.action_count, batch.row_count
             )
-            value = flipped_value_targets(torch, batch.value, value_flip)
-            if getattr(getattr(self.model, "arch", None), "value_activation", "logit") == "tanh":
-                value_loss = value_mse_loss(value_raw, value, batch.value_valid, batch.row_count)
+            tanh_head = (
+                getattr(getattr(self.model, "arch", None), "value_activation", "logit") == "tanh"
+            )
+            value_loss_fn = value_mse_loss if tanh_head else value_bce_loss
+            if mirror:
+                # whittlezero's mirrored stream: every pair trains both
+                # orientations (targets z and -z); the swapped example is
+                # masked to rows that actually carry an opponent state.
+                canonical, mirrored = value_raw[0], value_raw[1]
+                value_loss = value_loss_fn(
+                    canonical, batch.value, batch.value_valid, batch.row_count
+                )
+                present = getattr(batch.features, "opponent_state_present", None)
+                if present is not None:
+                    mirrored_valid = batch.value_valid * (present > 0).to(batch.value_valid.dtype)
+                    value_loss = 0.5 * value_loss + 0.5 * value_loss_fn(
+                        mirrored, -batch.value, mirrored_valid, batch.row_count
+                    )
+                value_raw = canonical
+                value = batch.value
             else:
-                value_loss = value_bce_loss(value_raw, value, batch.value_valid, batch.row_count)
+                value = flipped_value_targets(torch, batch.value, value_flip)
+                value_loss = value_loss_fn(value_raw, value, batch.value_valid, batch.row_count)
             loss = policy_loss + self.config.value_weight * value_loss
         loss.backward()
         grad_norm = torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.grad_clip)

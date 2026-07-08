@@ -436,7 +436,7 @@ def _model_class():
                 value_dim *= 2
             self.value = _mlp(nn, value_dim, arch.ffn_dim, 1, arch.activation, arch.dropout)
 
-        def forward(self, batch: GraphBatchTensors, value_flip: object = None):
+        def forward(self, batch: GraphBatchTensors, value_flip: object = None, value_mirror: bool = False):
             graph = _self_graph(batch)
             h, g_readout, node_mask = self._encode_graph(graph)
             kind = self.kind_embedding(batch.action_kind.clamp(0, self.schema.action_kind_vocab_size - 1))
@@ -455,6 +455,7 @@ def _model_class():
                 logits = self.policy(action_feat).squeeze(-1)
 
             value_input = g_readout
+            mirrored_input = None
             if self.arch.value_input == "scalar":
                 opponent = torch.stack((batch.opponent_reward, batch.opponent_present), dim=-1).to(g_readout.dtype)
                 value_input = torch.cat((g_readout, opponent), dim=-1)
@@ -469,11 +470,22 @@ def _model_class():
                     value_input = torch.cat((left, right), dim=-1)
                 else:
                     value_input = torch.cat((g_readout, opponent_readout), dim=-1)
+                if value_mirror:
+                    # whittlezero's mirrored emission, realized at train
+                    # time: the swapped orientation of every pair as a
+                    # second value example (target -z). The trunk readouts
+                    # are shared; only the value MLP runs twice.
+                    mirrored_input = torch.cat((opponent_readout, g_readout), dim=-1)
             value_raw = self.value(value_input).squeeze(-1)
             if self.arch.value_activation == "tanh":
                 # whittlezero's bounded value head: the serving-side search
                 # and the MSE training target share the [-1, 1] scale.
                 value_raw = torch.tanh(value_raw)
+            if mirrored_input is not None:
+                mirrored_raw = self.value(mirrored_input).squeeze(-1)
+                if self.arch.value_activation == "tanh":
+                    mirrored_raw = torch.tanh(mirrored_raw)
+                return torch.stack((value_raw, mirrored_raw)), logits
             return value_raw, logits
 
         def _encode_graph(self, graph: GraphStateTensors):
