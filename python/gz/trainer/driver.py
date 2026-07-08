@@ -185,6 +185,10 @@ def run(config_path: str | Path) -> None:
             stop_child(serve)
 
     selfplay = spawn_torch_selfplay(config)
+    opponent = OpponentTracker()
+    threading.Thread(
+        target=pump_selfplay_stderr, args=(selfplay, opponent), daemon=True
+    ).start()
     try:
         sampler = SampleClient(
             config.paths.sample_socket,
@@ -323,7 +327,11 @@ def run(config_path: str | Path) -> None:
                     "episode_len_ema": ack.episode_len_ema,
                     "stop_rate_ema": ack.stop_rate_ema,
                     "best_cost": ack.best_cost,
+                    **opponent.step_fields(),
                 }
+                # -1.0 = no labeled episode appended yet (unseeded EMA).
+                if ack.learner_win_rate_ema >= 0.0:
+                    record["learner_win_rate_ema"] = ack.learner_win_rate_ema
                 # Outcome gauges are per-store-open; a zero means unseeded
                 # (no episode appended by this selfplay process yet).
                 if ack.root is not None and ack.episode_cost_ema > 0.0:
@@ -331,6 +339,8 @@ def run(config_path: str | Path) -> None:
                 if ack.root is not None and ack.best_cost > 0.0:
                     record["reduction_best"] = ack.root.cost - ack.best_cost
                 record.update(window.drain(produced, ack.episodes))
+                for gate_event in opponent.drain_events():
+                    metrics.write(gate_event)
                 metrics.write(record)
             if (step + 1) % config.trainer.publish_interval == 0:
                 manifest = publish_ema(
@@ -385,6 +395,84 @@ def run(config_path: str | Path) -> None:
     else:
         kill_child(selfplay)
         metrics.finish()
+
+
+class OpponentTracker:
+    """Parses policy_gate lines off the selfplay stderr pump: raw events
+    queue for the metrics JSONL, and running aggregates fold into each
+    step record (wandb-safe: no out-of-step logging)."""
+
+    def __init__(self) -> None:
+        self.lock = threading.Lock()
+        self.events: list[dict[str, object]] = []
+        self.challenger_cost = None
+        self.best_cost = None
+        self.rollout_len = None
+        self.accepted_total = 0
+        self.rejected_total = 0
+
+    def observe(self, line: str) -> None:
+        fields = dict(
+            token.split("=", 1) for token in line.strip().split() if "=" in token
+        )
+        try:
+            accepted = fields["accepted"] == "true"
+            challenger_cost = -float(fields["challenger"])
+            best_cost = -float(fields["best"])
+            rollout_len = int(fields["steps"])
+        except (KeyError, ValueError):
+            return
+        with self.lock:
+            self.challenger_cost = challenger_cost
+            self.best_cost = (
+                best_cost if self.best_cost is None else min(self.best_cost, best_cost)
+            )
+            self.rollout_len = rollout_len
+            if accepted:
+                self.accepted_total += 1
+            else:
+                self.rejected_total += 1
+            self.events.append(
+                {
+                    "event": "opponent_gate",
+                    "timestamp": time.time(),
+                    "accepted": int(accepted),
+                    "challenger_cost": challenger_cost,
+                    "best_cost": best_cost,
+                    "rollout_len": rollout_len,
+                    "version": fields.get("version", ""),
+                }
+            )
+
+    def drain_events(self) -> list[dict[str, object]]:
+        with self.lock:
+            events, self.events = self.events, []
+        return events
+
+    def step_fields(self) -> dict[str, object]:
+        with self.lock:
+            if self.challenger_cost is None:
+                return {}
+            total = self.accepted_total + self.rejected_total
+            return {
+                "opponent_challenger_cost": self.challenger_cost,
+                "opponent_best_cost": self.best_cost,
+                "opponent_rollout_len": self.rollout_len,
+                "opponent_accepted_total": self.accepted_total,
+                "opponent_rejected_total": self.rejected_total,
+                "opponent_accept_rate": self.accepted_total / total,
+            }
+
+
+def pump_selfplay_stderr(process: subprocess.Popen[bytes], tracker: OpponentTracker) -> None:
+    """Relays the child's stderr to ours line-by-line, feeding gate lines
+    to the tracker. Runs as a daemon thread until the pipe closes."""
+    assert process.stderr is not None
+    for raw in iter(process.stderr.readline, b""):
+        sys.stderr.buffer.write(raw)
+        sys.stderr.buffer.flush()
+        if raw.startswith(b"event=policy_gate "):
+            tracker.observe(raw.decode("utf-8", "replace"))
 
 
 class MetricsWriter:
@@ -524,6 +612,13 @@ WANDB_KEYS = {
     "fraction_valid": "train/fraction_valid",
     "label_mean": "train/label_mean",
     "learner_win_rate": "train/learner_win_rate",
+    "learner_win_rate_ema": "selfplay/learner_win_rate_ema",
+    "opponent_challenger_cost": "opponent/challenger_cost",
+    "opponent_best_cost": "opponent/best_cost",
+    "opponent_rollout_len": "opponent/rollout_len",
+    "opponent_accepted_total": "opponent/accepted_total",
+    "opponent_rejected_total": "opponent/rejected_total",
+    "opponent_accept_rate": "opponent/accept_rate",
     "terminal_cost_mean": "selfplay/terminal_cost_mean",
     "terminal_cost_best": "selfplay/terminal_cost_best",
     "stop_rate": "selfplay/stop_rate",
@@ -778,6 +873,9 @@ def spawn_torch_selfplay(config: RunConfig) -> subprocess.Popen[bytes]:
         # take down the whole group instead of orphaning the evaluator (and
         # its GPU memory) when selfplay is SIGKILLed.
         start_new_session=True,
+        # Piped so OpponentTracker can parse policy_gate lines; the pump
+        # thread relays everything to our stderr unchanged.
+        stderr=subprocess.PIPE,
     )
 
 

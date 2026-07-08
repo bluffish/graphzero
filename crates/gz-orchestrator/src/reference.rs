@@ -811,12 +811,15 @@ where
                 .is_none_or(|incumbent| outcome.final_reward > incumbent.reward),
         };
         if self.gate == PolicyGate::Best {
+            // Machine-parsed by the trainer driver (opponent metrics);
+            // field changes must update its parser.
             eprintln!(
-                "event=policy_gate accepted={accepted} challenger={} best={} version={version}",
+                "event=policy_gate accepted={accepted} challenger={} best={} steps={} version={version}",
                 outcome.final_reward,
                 self.current
                     .as_ref()
                     .map_or(outcome.final_reward, |incumbent| incumbent.reward),
+                outcome.steps.len(),
             );
         }
         let challenger = PolicyReference {
