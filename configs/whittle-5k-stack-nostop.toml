@@ -6,6 +6,11 @@
 # featurization leg (killed early on request; its 5k comparison was
 # never completed).
 
+# ("the stack" = noema + gated + sage + tanh pair + fresh 4k window +
+# overlap 0.5 + alignment fix + whittle-v2 features; the accumulated
+# leg-name chain overflowed SUN_LEN for the run-dir sockets, hence the
+# short name.)
+
 [arch]
 dim = 128
 layers = 3
@@ -61,8 +66,8 @@ python_dir = "python"
 
 [wandb]
 project = "graphzero"
-run_name = "whittle-1024-pub32-5k-noema-gated-sage-tanh-fresh-ovl-fix-feat-nostop-1"
+run_name = "whittle-5k-stack-nostop-1"
 
 [paths]
-run_dir = "runs/whittle-1024-pub32-5k-noema-gated-sage-tanh-fresh-ovl-fix-feat-nostop"
+run_dir = "runs/whittle-5k-stack-nostop"
 graphzero_bin = "target/release/graphzero"
