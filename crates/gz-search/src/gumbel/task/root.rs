@@ -1,5 +1,5 @@
 use super::super::schedule::{
-    best_count_action, best_eligible, root_q_max, sample_count_action, search_value,
+    best_eligible, best_score_action, root_q_max, sample_count_action, search_value,
     selectable_root_actions, softmax,
 };
 use super::super::tree::{Edge, Node, Tree};
@@ -574,11 +574,31 @@ where
         let root_scores = self.tree.root_scores(root_index, &run.base_scores);
         let policy_target = self.tree.improved_policy(root_index);
         let selectable = selectable_root_actions(root_node, &run.considered);
-        let fallback = best_count_action(root_node, &selectable, &root_scores);
+        // Final selection is the score argmax, not the visit-count proxy:
+        // under tree reuse, budget crediting caps fresh simulations, so a
+        // carried favorite's visit total can never be outvoted even when
+        // fresh evals refute its Q (and counting only fresh visits has
+        // the opposite bias -- halving's eligibility gate deliberately
+        // starves the carried favorite of fresh visits). The score folds
+        // carried Q, fresh evidence, priors, and this move's Gumbel draw
+        // with the weights halving itself optimizes for.
+        // Only actions with a known outcome are playable: STOP, or a
+        // child some simulation actually applied (the visit-count proxy
+        // guaranteed this implicitly).
+        let playable: Vec<usize> = selectable
+            .iter()
+            .copied()
+            .filter(|&action| root_node.is_stop(action) || root_node.children[action].is_some())
+            .collect();
+        if playable.is_empty() {
+            return Err(internal("no simulated root action to select"));
+        }
+        let fallback = best_score_action(&playable, &root_scores);
         let selected = if self.context.selection_temperature > 0.0 {
             sample_count_action(
                 &mut run.rng,
-                &root_node.visits,
+                &self.tree.fresh_root_visits(),
+                &selectable,
                 self.context.selection_temperature,
                 fallback,
             )

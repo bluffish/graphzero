@@ -80,18 +80,13 @@ pub(super) fn selectable_root_actions<G, C>(node: &Node<G, C>, considered: &[usi
     actions
 }
 
-pub(super) fn best_count_action<G, C>(
-    node: &Node<G, C>,
-    considered: &[usize],
-    scores: &[f32],
-) -> usize {
+pub(super) fn best_score_action(considered: &[usize], scores: &[f32]) -> usize {
     considered
         .iter()
         .copied()
         .max_by(|&left, &right| {
-            node.visits[left]
-                .cmp(&node.visits[right])
-                .then_with(|| scores[left].total_cmp(&scores[right]))
+            scores[left]
+                .total_cmp(&scores[right])
                 .then_with(|| right.cmp(&left))
         })
         .expect("considered actions is non-empty")
@@ -257,6 +252,7 @@ pub(super) fn sample_root_gumbels(count: usize, scale: f32, rng: &mut GumbelRng)
 pub(super) fn sample_count_action(
     rng: &mut GumbelRng,
     visits: &[u32],
+    allowed: &[usize],
     temperature: f32,
     fallback: usize,
 ) -> usize {
@@ -266,16 +262,17 @@ pub(super) fn sample_count_action(
 
     let inv_temp = 1.0 / temperature;
     let mut total = 0.0;
-    let mut weights = Vec::with_capacity(visits.len());
+    let mut weights = vec![0.0; visits.len()];
 
-    for visits in visits {
-        let weight = if *visits == 0 {
+    for &action in allowed {
+        let count = visits[action];
+        let weight = if count == 0 {
             0.0
         } else {
-            (*visits as f32).powf(inv_temp)
+            (count as f32).powf(inv_temp)
         };
         total += weight;
-        weights.push(weight);
+        weights[action] = weight;
     }
 
     if total <= 0.0 || !total.is_finite() {

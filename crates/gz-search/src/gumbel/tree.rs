@@ -16,6 +16,12 @@ pub(super) struct Tree<G, C> {
     pub(super) portable_contexts: usize,
     pub(super) carried_nodes: usize,
     pub(super) carried_root_visits: u32,
+    /// Per-action root visits inherited from the previous move's subtree.
+    /// Final-move selection counts only visits earned by THIS move's
+    /// simulations: a carried favorite must not outvote a fresh search
+    /// that discovered better Q (whittlezero searches a fresh tree per
+    /// move, so its max-visits selection is always this-move evidence).
+    pub(super) carried_root_action_visits: Vec<u32>,
 }
 
 impl<G, C> Tree<G, C>
@@ -32,6 +38,7 @@ where
             portable_contexts: 0,
             carried_nodes: 0,
             carried_root_visits: 0,
+            carried_root_action_visits: Vec::new(),
         }
     }
 
@@ -76,6 +83,7 @@ where
             .map(|node| node.context)
             .ok_or_else(|| internal("empty reused subtree"))?;
         let carried_root_visits = nodes[0].visits.iter().sum();
+        let carried_root_action_visits = nodes[0].visits.clone();
         let carried_nodes = nodes.len();
 
         Ok((
@@ -87,10 +95,28 @@ where
                 portable_contexts: 0,
                 carried_nodes,
                 carried_root_visits,
+                carried_root_action_visits,
             },
             root_context,
             handles,
         ))
+    }
+
+    /// Root visits earned by this move's simulations alone.
+    pub(super) fn fresh_root_visits(&self) -> Vec<u32> {
+        self.nodes[0]
+            .visits
+            .iter()
+            .enumerate()
+            .map(|(action, visits)| {
+                visits
+                    - self
+                        .carried_root_action_visits
+                        .get(action)
+                        .copied()
+                        .unwrap_or(0)
+            })
+            .collect()
     }
 
     pub(super) fn backup(&mut self, path: &[Edge], value: f32) {
