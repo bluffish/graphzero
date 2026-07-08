@@ -123,6 +123,7 @@ fn root_baseline_replay_appends_every_eligible_episode() {
                 store: &store,
                 providers,
                 backpressure: None,
+                length_tiebreak: false,
             },
         )
         .unwrap();
@@ -195,6 +196,7 @@ fn greedy_reference_labels_are_valid_and_present() {
                 store: &store,
                 providers,
                 backpressure: None,
+                length_tiebreak: false,
             },
         )
         .unwrap();
@@ -254,6 +256,7 @@ fn backpressure_gate_allows_consumer_to_drain_and_complete() {
                         max_row_backlog: max_backlog,
                         gate_poll: Duration::from_millis(1),
                     }),
+                    length_tiebreak: false,
                 },
             )
             .unwrap();
@@ -291,6 +294,7 @@ fn run_root_replay(
                 store: &store,
                 providers,
                 backpressure: None,
+                length_tiebreak: false,
             },
         )
         .unwrap();
@@ -383,13 +387,16 @@ fn policy_reference_refreshes_per_model_version_and_skips_replay() {
                 store: &store,
                 providers: vec![PolicyReferenceProvider::new()],
                 backpressure: None,
+                length_tiebreak: false,
             },
         )
         .unwrap();
 
-    // Rollout episodes never reach the store or the counters.
-    assert_eq!(run.episodes_appended, episodes);
-    assert_eq!(run.episodes_dropped, 0);
+    // Rollout episodes never reach the store or the counters. The first
+    // admission precedes the first completed rollout and is dropped
+    // rather than stored unlabeled.
+    assert_eq!(run.episodes_appended, episodes - 1);
+    assert_eq!(run.episodes_dropped, 1);
     let records = replay_records(&store, run.episodes_appended);
     let row_count = records
         .iter()
@@ -397,15 +404,13 @@ fn policy_reference_refreshes_per_model_version_and_skips_replay() {
         .sum::<u64>();
     assert_eq!(store.counters().produced_rows, row_count);
 
-    // The first admission precedes the first completed rollout.
-    assert!(records[0].outcome.reference.is_none());
-
-    // Labeled episodes carry the rollout scalar: kind Gumbel, versioned.
+    // Every stored episode carries the rollout scalar: kind Gumbel,
+    // versioned.
     let references = records
         .iter()
-        .filter_map(|record| record.outcome.reference.as_ref())
+        .map(|record| record.outcome.reference.as_ref().unwrap())
         .collect::<Vec<_>>();
-    assert!(!references.is_empty());
+    assert_eq!(references.len(), records.len());
     for reference in &references {
         assert_eq!(reference.kind, ReplayReferenceKind::Gumbel);
         assert!(reference.model_version.is_some());
@@ -471,24 +476,25 @@ fn self_average_reference_labels_after_the_first_episode() {
                 store: &store,
                 providers,
                 backpressure: None,
+                length_tiebreak: false,
             },
         )
         .unwrap();
 
-    assert_eq!(run.episodes_appended, 5);
+    // The first admission has no EMA yet and is dropped, but its reward
+    // still seeds the EMA (observe fires for all 5).
+    assert_eq!(run.episodes_appended, 4);
+    assert_eq!(run.episodes_dropped, 1);
     assert_eq!(observed.load(Ordering::Relaxed), 5);
 
     let mut labeled = 0;
-    for id in 0..5 {
+    for id in 0..4 {
         let record = store
             .episode(gz_replay::ReplayEpisodeId::new(id))
             .unwrap()
             .unwrap();
         let value_target = record.outcome.value_target;
-        if id == 0 {
-            assert_eq!(value_target, None, "first admission has no EMA yet");
-            assert!(record.outcome.reference.is_none());
-        } else if let Some(target) = value_target {
+        if let Some(target) = value_target {
             assert!(target == 1.0 || target == 0.0 || target == -1.0);
             let reference = record.outcome.reference.unwrap();
             assert_eq!(reference.kind, gz_replay::ReplayReferenceKind::SelfAverage);

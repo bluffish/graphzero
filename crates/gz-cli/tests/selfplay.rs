@@ -96,6 +96,7 @@ fn selfplay_run_writes_replay_rows() {
         position_features: true,
         no_backtrack: false,
         mask_stop: false,
+        length_tiebreak: false,
         eval_processes: 1,
     })
     .unwrap();
@@ -141,6 +142,7 @@ fn selfplay_run_supports_stub_evaluator() {
         position_features: true,
         no_backtrack: false,
         mask_stop: false,
+        length_tiebreak: false,
         eval_processes: 1,
     })
     .unwrap();
@@ -183,13 +185,16 @@ fn selfplay_run_supports_self_average_reference() {
         position_features: true,
         no_backtrack: false,
         mask_stop: false,
+        length_tiebreak: false,
         eval_processes: 1,
     })
     .unwrap();
 
-    assert_eq!(summary.episodes_appended, 4);
+    // The first admission per lane has no EMA yet; it is dropped rather
+    // than stored unlabeled.
+    assert_eq!(summary.episodes_appended, 3);
+    assert_eq!(summary.episodes_dropped, 1);
     let labeled = summary.wins + summary.losses + summary.ties;
-    // The first admission per lane has no EMA yet and stays unlabeled.
     assert_eq!(labeled, 3);
 }
 
@@ -226,14 +231,17 @@ fn selfplay_run_supports_policy_reference() {
         position_features: true,
         no_backtrack: false,
         mask_stop: false,
+        length_tiebreak: false,
         eval_processes: 1,
     })
     .unwrap();
 
-    // The opponent rollout is excluded from the episode counters.
-    assert_eq!(summary.episodes_appended, 4);
-    // The first admission precedes the first completed rollout and stays
-    // unlabeled; every later episode labels against the rollout scalar.
+    // The opponent rollout is excluded from the episode counters. The
+    // first admission precedes the first completed rollout and is
+    // dropped rather than stored unlabeled; every later episode labels
+    // against the rollout scalar.
+    assert_eq!(summary.episodes_appended, 3);
+    assert_eq!(summary.episodes_dropped, 1);
     let labeled = summary.wins + summary.losses + summary.ties;
     assert_eq!(labeled, 3);
 }
@@ -283,6 +291,7 @@ fn serving_config(dir: &TestDir) -> SelfplayConfig {
         position_features: true,
         no_backtrack: false,
         mask_stop: false,
+        length_tiebreak: false,
         eval_processes: 1,
     }
 }
@@ -470,15 +479,24 @@ fn fixed_root_mode_shares_one_graph_with_distinct_episodes() {
         position_features: true,
         no_backtrack: false,
         mask_stop: false,
+        length_tiebreak: false,
         eval_processes: 1,
     })
     .unwrap();
-    assert_eq!(summary.episodes_appended, 6);
+    // Admissions that precede a lane's first completed episode have no
+    // EMA reference yet and are dropped (up to workers-per-lane each),
+    // so only the labeled remainder reaches the store.
+    assert_eq!(summary.episodes_appended + summary.episodes_dropped, 6);
+    assert!(
+        summary.episodes_appended >= 2,
+        "{}",
+        summary.episodes_appended
+    );
 
     let store = ReplayStore::open(dir.path()).unwrap();
     let mut roots = std::collections::HashSet::new();
     let mut step_sets = std::collections::HashSet::new();
-    for id in 0..6 {
+    for id in 0..summary.episodes_appended {
         let record = store
             .episode(gz_replay::ReplayEpisodeId::new(id))
             .unwrap()

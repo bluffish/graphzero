@@ -87,6 +87,9 @@ class SelfplayConfig:
     gumbel_noise_overlap: float = -1.0
     # Mask STOP out of learner search wherever a rewrite exists.
     mask_stop: bool = False
+    # Break equal-reward games by episode length, shorter wins
+    # (whittlezero's ptp_duration_tiebreak, discrete form).
+    length_tiebreak: bool = False
     # Fraction of episodes referenced against the latest rollout instead
     # of the gated best (whittlezero's ptp.gamma; gated-policy only).
     reference_gamma: float = 0.0
@@ -727,6 +730,8 @@ def spawn_torch_selfplay(config: RunConfig) -> subprocess.Popen[bytes]:
             "true" if config.selfplay.tree_reuse else "false",
             "--mask-stop",
             "true" if config.selfplay.mask_stop else "false",
+            "--length-tiebreak",
+            "true" if config.selfplay.length_tiebreak else "false",
             "--eval-processes",
             str(config.selfplay.eval_processes),
             "--evaluator",

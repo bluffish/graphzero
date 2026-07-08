@@ -48,7 +48,7 @@ fn projected_episode_appends_to_replay_store() {
     let episode = run_episode();
     let reference = reference(&episode, episode.final_measure.scalar_reward.unwrap() - 1.0);
 
-    let (record, rows) = project_episode(&episode, Some(&reference), None, 7).unwrap();
+    let (record, rows) = project_episode(&episode, Some(&reference), None, false, 7).unwrap();
     let id = store.append_episode(&record, &rows).unwrap();
 
     assert_eq!(store.episode(id).unwrap(), Some(record));
@@ -62,7 +62,7 @@ fn labels_follow_win_loss_tie_sign_rule() {
 
     for (reference_reward, expected) in [(learner - 1.0, Some(1.0)), (learner + 1.0, Some(-1.0))] {
         let reference = reference(&episode, reference_reward);
-        let (record, rows) = project_episode(&episode, Some(&reference), None, 7).unwrap();
+        let (record, rows) = project_episode(&episode, Some(&reference), None, false, 7).unwrap();
 
         assert_eq!(record.outcome.value_target, expected);
         assert!(rows.iter().all(|row| row.value_target == expected));
@@ -75,7 +75,7 @@ fn exact_ties_coin_flip_to_hard_signs_deterministically() {
     let learner = episode.final_measure.scalar_reward.unwrap();
     let reference = reference(&episode, learner);
 
-    let first = project_episode(&episode, Some(&reference), None, 7)
+    let first = project_episode(&episode, Some(&reference), None, false, 7)
         .unwrap()
         .0
         .outcome
@@ -85,7 +85,7 @@ fn exact_ties_coin_flip_to_hard_signs_deterministically() {
 
     // Same episode id -> same coin; the flip is a deterministic label,
     // not per-sample noise.
-    let again = project_episode(&episode, Some(&reference), None, 7)
+    let again = project_episode(&episode, Some(&reference), None, false, 7)
         .unwrap()
         .0
         .outcome
@@ -96,7 +96,7 @@ fn exact_ties_coin_flip_to_hard_signs_deterministically() {
     // Both signs are reachable across episode ids.
     let signs: std::collections::HashSet<i8> = (0..64)
         .map(|id| {
-            let target = project_episode(&episode, Some(&reference), None, id)
+            let target = project_episode(&episode, Some(&reference), None, false, id)
                 .unwrap()
                 .0
                 .outcome
@@ -109,12 +109,89 @@ fn exact_ties_coin_flip_to_hard_signs_deterministically() {
 }
 
 #[test]
+fn length_tiebreak_breaks_reward_ties_shorter_wins() {
+    let episode = run_episode();
+    let learner = episode.final_measure.scalar_reward.unwrap();
+    let len = episode.steps.len();
+
+    for (reference_steps, expected) in [(len + 1, 1.0), (len.saturating_sub(1).max(1), -1.0)] {
+        if reference_steps == len {
+            continue;
+        }
+        let reference = reference_with_steps(&episode, learner, reference_steps);
+        let target = project_episode(&episode, Some(&reference), None, true, 7)
+            .unwrap()
+            .0
+            .outcome
+            .value_target
+            .unwrap();
+        assert_eq!(target, expected);
+    }
+}
+
+#[test]
+fn length_tiebreak_defers_to_reward_inequality() {
+    let episode = run_episode();
+    let learner = episode.final_measure.scalar_reward.unwrap();
+
+    // Longer reference but worse reward: reward comparison wins.
+    let reference = reference_with_steps(&episode, learner - 1.0, episode.steps.len() + 4);
+    let target = project_episode(&episode, Some(&reference), None, true, 7)
+        .unwrap()
+        .0
+        .outcome
+        .value_target
+        .unwrap();
+    assert_eq!(target, 1.0);
+}
+
+#[test]
+fn length_tiebreak_equal_lengths_and_flag_off_fall_to_coin() {
+    let episode = run_episode();
+    let learner = episode.final_measure.scalar_reward.unwrap();
+
+    let coin = project_episode(
+        &episode,
+        Some(&reference_with_steps(&episode, learner, 1)),
+        None,
+        false,
+        7,
+    )
+    .unwrap()
+    .0
+    .outcome
+    .value_target
+    .unwrap();
+
+    // Flag on, equal lengths: same coin as flag off.
+    let equal = reference_with_steps(&episode, learner, episode.steps.len());
+    let target = project_episode(&episode, Some(&equal), None, true, 7)
+        .unwrap()
+        .0
+        .outcome
+        .value_target
+        .unwrap();
+    assert_eq!(target, coin);
+
+    // Flag on, stepless reference (no length recorded): opts out to coin.
+    let mut stepless = reference_with_steps(&episode, learner, 1);
+    stepless.steps.clear();
+    let target = project_episode(&episode, Some(&stepless), None, true, 7)
+        .unwrap()
+        .0
+        .outcome
+        .value_target
+        .unwrap();
+    assert_eq!(target, coin);
+}
+
+#[test]
 fn reference_none_yields_policy_only_rows_that_append() {
     let dir = TestDir::new();
     let store = ReplayStore::open(dir.path()).unwrap();
     let episode = run_episode();
 
-    let (record, rows) = project_episode(&episode, None, None, 7).unwrap();
+    let (record, rows) = project_episode(&episode, None, None, false, 7).unwrap();
 
     assert_eq!(record.outcome.value_target, None);
     assert!(rows.iter().all(|row| row.value_target.is_none()));
@@ -126,7 +203,7 @@ fn ineligible_episode_projects_to_none() {
     let mut episode = run_episode();
     episode.final_measure.valid = false;
 
-    assert!(project_episode(&episode, None, None, 7).is_none());
+    assert!(project_episode(&episode, None, None, false, 7).is_none());
 }
 
 #[test]
@@ -134,7 +211,7 @@ fn row_count_matches_steps_and_stop_row_is_decision_state() {
     let episode = run_episode();
 
     assert_eq!(episode.stop_reason, GumbelStopReason::SelectedStop);
-    let (record, rows) = project_episode(&episode, None, None, 7).unwrap();
+    let (record, rows) = project_episode(&episode, None, None, false, 7).unwrap();
     let last_step = episode.steps.last().unwrap();
     let last_row = rows.last().unwrap();
 
@@ -155,7 +232,7 @@ fn feature_rows_are_attached_in_step_order() {
         .map(|index| vec![index as u8, 99])
         .collect::<Vec<_>>();
 
-    let (_, rows) = project_episode(&episode, None, Some(&feature_rows), 7).unwrap();
+    let (_, rows) = project_episode(&episode, None, Some(&feature_rows), false, 7).unwrap();
 
     assert_eq!(
         rows.iter()
@@ -170,7 +247,7 @@ fn feature_row_length_mismatch_rejects_projection() {
     let episode = run_episode();
     let feature_rows = Vec::new();
 
-    assert!(project_episode(&episode, None, Some(&feature_rows), 7).is_none());
+    assert!(project_episode(&episode, None, Some(&feature_rows), false, 7).is_none());
 }
 
 fn run_episode() -> GumbelEpisode<WhittleGraphId, WhittleCandidateId> {
@@ -217,14 +294,25 @@ fn reference(
     episode: &GumbelEpisode<WhittleGraphId, WhittleCandidateId>,
     final_reward: f32,
 ) -> Reference {
+    reference_with_steps(episode, final_reward, 1)
+}
+
+fn reference_with_steps(
+    episode: &GumbelEpisode<WhittleGraphId, WhittleCandidateId>,
+    final_reward: f32,
+    steps: usize,
+) -> Reference {
     Reference {
         kind: ReplayReferenceKind::RootBaseline,
         final_reward,
         final_graph: Some(episode.root_context),
-        steps: vec![ReferenceStep {
-            context: episode.root_context,
-            features: None,
-        }],
+        steps: vec![
+            ReferenceStep {
+                context: episode.root_context,
+                features: None,
+            };
+            steps
+        ],
         search_config_hash: None,
         model_version: None,
     }

@@ -52,6 +52,15 @@ pub trait ReferenceProvider<E: GraphEngine> {
     fn finish_rollout(&mut self, outcome: Option<RolloutOutcome>) {
         let _ = outcome;
     }
+
+    /// Whether episodes are expected to carry a reference once this
+    /// provider is warmed up. When true, episodes that completed before
+    /// the first reference existed (the pre-rollout admission wave) are
+    /// dropped instead of stored as unlabeled rows: the store then only
+    /// ever contains labeled, on-distribution training data.
+    fn expects_reference(&self) -> bool {
+        true
+    }
 }
 
 /// The measured result of an opponent rollout episode.

@@ -72,6 +72,7 @@ fn replay_serve_returns_feature_batch_and_targets() {
         position_features: true,
         no_backtrack: false,
         mask_stop: false,
+        length_tiebreak: false,
         eval_processes: 1,
     })
     .unwrap();
@@ -180,6 +181,7 @@ fn replay_serve_rejects_featureless_store() {
         position_features: true,
         no_backtrack: false,
         mask_stop: false,
+        length_tiebreak: false,
         eval_processes: 1,
     })
     .unwrap();
@@ -398,6 +400,7 @@ fn in_process_sample_service_serves_during_production() {
                 store: &store,
                 providers,
                 backpressure: None,
+                length_tiebreak: false,
             },
         )
         .unwrap();
@@ -461,6 +464,7 @@ fn live_backpressure_gates_production_until_the_consumer_drains() {
                         max_row_backlog: NonZeroU64::new(4).unwrap(),
                         gate_poll: Duration::from_millis(1),
                     }),
+                    length_tiebreak: false,
                 },
             );
             result_tx.send(run).unwrap();
@@ -508,6 +512,7 @@ fn replay_serve_reacks_a_repeated_hello_on_a_live_connection() {
                 store: &store,
                 providers,
                 backpressure: None,
+                length_tiebreak: false,
             },
         )
         .unwrap();
@@ -557,6 +562,7 @@ fn serve_survives_a_failed_connection_and_accepts_the_next() {
                 store: &store,
                 providers,
                 backpressure: None,
+                length_tiebreak: false,
             },
         )
         .unwrap();

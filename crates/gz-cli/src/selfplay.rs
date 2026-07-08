@@ -74,6 +74,9 @@ pub struct SelfplayConfig {
     /// (STOP-only nodes keep it); episodes then run to the step budget.
     /// Reference rollouts always mask STOP regardless.
     pub mask_stop: bool,
+    /// Break equal-reward games by episode length (shorter wins) before
+    /// the coin flip: whittlezero's duration tiebreak, discrete form.
+    pub length_tiebreak: bool,
     /// Evaluator processes to spawn and stripe lanes across (featurized
     /// evaluators only). Each process parallelizes per-batch host work
     /// on its own interpreter and keeps the GPU kernel queue dense.
@@ -112,6 +115,7 @@ impl Default for SelfplayConfig {
             position_features: true,
             no_backtrack: false,
             mask_stop: false,
+            length_tiebreak: false,
             eval_processes: 1,
         }
     }
@@ -446,6 +450,7 @@ fn run_random(
                 store: &store,
                 providers,
                 backpressure: replay_backpressure(&config),
+                length_tiebreak: config.length_tiebreak,
             },
         )
         .map_err(|error| error.to_string())?;
@@ -483,6 +488,7 @@ fn run_stub(
                 store: &store,
                 providers,
                 backpressure: replay_backpressure(&config),
+                length_tiebreak: config.length_tiebreak,
             },
         )
         .map_err(|error| error.to_string())?;
@@ -556,6 +562,7 @@ fn run_process(
                 store: &store,
                 providers,
                 backpressure: replay_backpressure(&config),
+                length_tiebreak: config.length_tiebreak,
             },
         )
         .map_err(|error| error.to_string())?;
@@ -942,6 +949,10 @@ enum CliReferenceProvider {
 }
 
 impl ReferenceProvider<WhittleEngine> for CliReferenceProvider {
+    fn expects_reference(&self) -> bool {
+        !matches!(self, Self::None)
+    }
+
     fn reference(
         &mut self,
         engine: &mut WhittleEngine,

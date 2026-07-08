@@ -7,6 +7,7 @@ pub fn project_episode<G, C>(
     episode: &GumbelEpisode<G, C>,
     reference: Option<&Reference>,
     feature_rows: Option<&[Vec<u8>]>,
+    length_tiebreak: bool,
     episode_id: u64,
 ) -> Option<(ReplayEpisodeRecord, Vec<ReplayRow>)> {
     let learner_reward = score(
@@ -21,8 +22,17 @@ pub fn project_episode<G, C>(
     }
 
     let final_measure = MeasureSummary::from(&episode.final_measure);
-    let value_target =
-        reference.map(|reference| sign_target(learner_reward, reference.final_reward, episode_id));
+    let value_target = reference.map(|reference| {
+        let reference_len =
+            (length_tiebreak && !reference.steps.is_empty()).then_some(reference.steps.len());
+        sign_target(
+            learner_reward,
+            reference.final_reward,
+            episode.steps.len(),
+            reference_len,
+            episode_id,
+        )
+    });
     let replay_reference = reference.map(|reference| ReplayReference {
         kind: reference.kind,
         reward: reference.final_reward,
@@ -71,6 +81,17 @@ pub fn project_episode<G, C>(
     Some((record, rows))
 }
 
+/// The learner reward an episode would project with, if eligible.
+/// Lets callers that drop an episode from the store still feed the
+/// reference provider's reward statistics.
+pub fn episode_reward<G, C>(episode: &GumbelEpisode<G, C>) -> Option<f32> {
+    score(
+        episode.final_measure.measured,
+        episode.final_measure.valid,
+        episode.final_measure.scalar_reward,
+    )
+}
+
 fn score(measured: bool, valid: bool, scalar_reward: Option<f32>) -> Option<f32> {
     if !measured || !valid {
         return None;
@@ -82,23 +103,42 @@ fn score(measured: bool, valid: bool, scalar_reward: Option<f32>) -> Option<f32>
     }
 }
 
-fn sign_target(learner: f32, reference: f32, episode_id: u64) -> f32 {
+fn sign_target(
+    learner: f32,
+    reference: f32,
+    learner_len: usize,
+    reference_len: Option<usize>,
+    episode_id: u64,
+) -> f32 {
     if learner > reference {
-        1.0
-    } else if learner < reference {
-        -1.0
-    } else {
-        // Random tie-break (whittlezero's ptp_sign_tie_break: random). A
-        // zero target is a safe haven the search can lock onto: stopping
-        // at the root guarantees the tie, so visits, policy targets, and
-        // finally the argmax reference all converge on stop-at-root. A
-        // fair deterministic coin keeps every label hard +/-1. Salted so
-        // the coin is independent of the episode's Gumbel noise stream.
-        const TIE_SALT: u64 = 0x7469_655f_6272_6561; // "tie_brea"
-        if crate::root::episode_noise_seed(episode_id ^ TIE_SALT) & 1 == 0 {
-            1.0
-        } else {
-            -1.0
+        return 1.0;
+    }
+    if learner < reference {
+        return -1.0;
+    }
+    // Length tie-break (whittlezero's ptp_duration_tiebreak, discrete
+    // form): at equal reward the shorter episode wins, so reward ties
+    // carry an efficiency signal instead of noise. Both lengths count
+    // moves; references without per-step states opt out upstream
+    // (reference_len None).
+    if let Some(reference_len) = reference_len {
+        if learner_len < reference_len {
+            return 1.0;
         }
+        if learner_len > reference_len {
+            return -1.0;
+        }
+    }
+    // Random tie-break (whittlezero's ptp_sign_tie_break: random). A
+    // zero target is a safe haven the search can lock onto: stopping
+    // at the root guarantees the tie, so visits, policy targets, and
+    // finally the argmax reference all converge on stop-at-root. A
+    // fair deterministic coin keeps every label hard +/-1. Salted so
+    // the coin is independent of the episode's Gumbel noise stream.
+    const TIE_SALT: u64 = 0x7469_655f_6272_6561; // "tie_brea"
+    if crate::root::episode_noise_seed(episode_id ^ TIE_SALT) & 1 == 0 {
+        1.0
+    } else {
+        -1.0
     }
 }

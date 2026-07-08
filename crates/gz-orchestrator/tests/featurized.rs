@@ -8,7 +8,7 @@ use gz_features::{
     FeatureExtractor, FeatureResult, FeatureRow, FeatureSchema, FeatureSchemaConfig,
     PositionFeatures, decode_feature_row,
 };
-use gz_orchestrator::reference::{RootBaselineProvider, SelfAverageProvider};
+use gz_orchestrator::reference::{ReferenceProvider, RootBaselineProvider};
 use gz_orchestrator::{
     CountedRoots, FeaturizedRuntime, ReplayRuntime, ThreadedGumbelOrchestrator,
     ThreadedOrchestratorConfig,
@@ -141,6 +141,7 @@ fn featurized_replay_appends_rows() {
                 store: &store,
                 providers,
                 backpressure: None,
+                length_tiebreak: false,
             },
         )
         .unwrap();
@@ -173,6 +174,24 @@ fn featurized_replay_appends_rows() {
     }
 }
 
+/// Never supplies a reference and never expects one: rows are stored
+/// unlabeled instead of dropped (the reference=none pipeline shape).
+struct NoReferenceProvider;
+
+impl<E: GraphEngine> ReferenceProvider<E> for NoReferenceProvider {
+    fn reference(
+        &mut self,
+        _engine: &mut E,
+        _root: E::Graph,
+    ) -> EngineResult<Option<gz_orchestrator::reference::Reference>> {
+        Ok(None)
+    }
+
+    fn expects_reference(&self) -> bool {
+        false
+    }
+}
+
 #[test]
 fn featurized_replay_unlabeled_rows_have_no_opponent_scalar() {
     let dir = TestDir::new();
@@ -191,8 +210,9 @@ fn featurized_replay_unlabeled_rows_have_no_opponent_scalar() {
             },
             ReplayRuntime {
                 store: &store,
-                providers: vec![SelfAverageProvider::new(0.9)],
+                providers: vec![NoReferenceProvider],
                 backpressure: None,
+                length_tiebreak: false,
             },
         )
         .unwrap();
@@ -242,6 +262,7 @@ fn featurized_replay_schema_error_includes_replay_detail() {
                 store: &store,
                 providers,
                 backpressure: None,
+                length_tiebreak: false,
             },
         )
         .unwrap_err();

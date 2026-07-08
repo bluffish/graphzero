@@ -1,6 +1,6 @@
 use crate::EpisodeId;
 use crate::pool::{Admission, WorkerPool};
-use crate::project::project_episode;
+use crate::project::{episode_reward, project_episode};
 use crate::reference::{Reference, ReferenceProvider, RolloutOutcome};
 use crate::root::RootSource;
 use crate::serial::OrchestratedEpisode;
@@ -59,6 +59,9 @@ pub struct ReplayRuntime<'a, P> {
     pub store: &'a ReplayStore,
     pub providers: Vec<P>,
     pub backpressure: Option<ReplayBackpressure>,
+    /// Break equal-reward games by episode length (shorter wins) before
+    /// the coin flip: whittlezero's duration tiebreak, discrete form.
+    pub length_tiebreak: bool,
 }
 
 pub struct FeaturizedRuntime<X, B> {
@@ -274,6 +277,7 @@ where
         let providers = replay.providers;
         let store = replay.store;
         let backpressure = replay.backpressure;
+        let length_tiebreak = replay.length_tiebreak;
 
         let (batch_result, sink_result, lane_results) = std::thread::scope(|scope| {
             let batch_handle =
@@ -302,7 +306,7 @@ where
                             intake_tx,
                             reply_rx,
                         },
-                        ReplayMode::new(provider, replay_tx, store, backpressure),
+                        ReplayMode::new(provider, replay_tx, store, backpressure, length_tiebreak),
                     )
                 }));
             }
@@ -530,6 +534,7 @@ where
         let providers = replay.providers;
         let store = replay.store;
         let backpressure = replay.backpressure;
+        let length_tiebreak = replay.length_tiebreak;
         let feature_schema = first_schema::<E, X>(&extractors, schema_hash)?;
         store
             .ensure_feature_schema(feature_schema.config())
@@ -581,6 +586,7 @@ where
                             replay_tx,
                             store,
                             backpressure,
+                            length_tiebreak,
                         ),
                     )
                 }));
@@ -920,6 +926,7 @@ struct ReplayMode<'a, P> {
     replay_tx: SyncSender<ReplayJob>,
     store: &'a ReplayStore,
     backpressure: Option<ReplayBackpressure>,
+    length_tiebreak: bool,
     references: HashMap<EpisodeId, Option<Reference>>,
     summary: ReplayLaneSummary,
     rollout: Option<OpponentRollout>,
@@ -931,12 +938,14 @@ impl<'a, P> ReplayMode<'a, P> {
         replay_tx: SyncSender<ReplayJob>,
         store: &'a ReplayStore,
         backpressure: Option<ReplayBackpressure>,
+        length_tiebreak: bool,
     ) -> Self {
         Self {
             provider,
             replay_tx,
             store,
             backpressure,
+            length_tiebreak,
             references: HashMap::new(),
             summary: ReplayLaneSummary {
                 lane: 0,
@@ -1058,10 +1067,26 @@ where
             .as_ref()
             .map_or(0, |reference| reference.steps.len() as u64);
 
+        // Episodes admitted before the provider's first reference existed
+        // carry none; storing them would seed training with unlabeled,
+        // off-distribution rows.
+        if reference.is_none() && self.provider.expects_reference() {
+            release_episode_handles(engine, &completed.episode, &[])?;
+            // The reward still feeds the provider (it seeds self-average
+            // EMAs); only the store is skipped.
+            if let Some(reward) = episode_reward(&completed.episode) {
+                self.provider.observe(reward);
+            }
+            self.summary.episodes_dropped += 1;
+            clear_replayed_episode_trace(&mut completed.episode);
+            return Ok(());
+        }
+
         if let Some((record, rows)) = project_episode(
             &completed.episode,
             reference.as_ref(),
             None,
+            self.length_tiebreak,
             completed.episode_id.value(),
         ) {
             let reward = record.outcome.learner_reward;
@@ -1100,10 +1125,11 @@ impl<'a, X, P> FeaturizedReplayMode<'a, X, P> {
         replay_tx: SyncSender<ReplayJob>,
         store: &'a ReplayStore,
         backpressure: Option<ReplayBackpressure>,
+        length_tiebreak: bool,
     ) -> Self {
         Self {
             extractor,
-            replay: ReplayMode::new(provider, replay_tx, store, backpressure),
+            replay: ReplayMode::new(provider, replay_tx, store, backpressure, length_tiebreak),
             candidate_options: CandidateOptions::default(),
             export_position: true,
         }
@@ -1228,6 +1254,17 @@ where
             .references
             .remove(&completed.episode_id)
             .ok_or_else(|| internal("missing replay reference"))?;
+        if reference.is_none() && self.replay.provider.expects_reference() {
+            self.replay.summary.episodes_completed += 1;
+            self.replay.summary.search_contexts += episode_search_contexts(&completed.episode);
+            release_episode_handles(engine, &completed.episode, &[])?;
+            if let Some(reward) = episode_reward(&completed.episode) {
+                self.replay.provider.observe(reward);
+            }
+            self.replay.summary.episodes_dropped += 1;
+            clear_replayed_episode_trace(&mut completed.episode);
+            return Ok(());
+        }
         let feature_rows = feature_rows_for_episode(
             engine,
             &mut self.extractor,
@@ -1245,6 +1282,7 @@ where
             &completed.episode,
             reference.as_ref(),
             Some(&feature_rows.rows),
+            self.replay.length_tiebreak,
             completed.episode_id.value(),
         ) {
             let reward = record.outcome.learner_reward;
