@@ -140,7 +140,16 @@ to pre-change with gamma=0.0.
 
 ## Stage 1: registry replaces per-lane providers (gated-policy path)
 
-New module crates/gz-orchestrator/src/registry.rs:
+New crate crates/gz-measurer, created here and grown through Stage 3.
+Dependency rule (compiler-enforced transport invariant): gz-measurer
+depends on gz-engine + gz-features + gz-replay ONLY -- no gz-search,
+no gz-orchestrator, so it cannot name an engine handle or a lane type
+by construction. Reference and ReferenceStep move down into it; lanes
+convert GumbelEpisode into the portable artifact before shipping. The
+phase-2 socket server becomes a thin binary over this same crate (the
+gz-eval-service pattern).
+
+registry.rs in gz-measurer:
 ReferenceRegistry {current, last_challenged, pending} behind a Mutex
 (44 lanes x admission-rate reads; contention is negligible against
 eval latency). PolicyReferenceProvider becomes a thin adapter over
@@ -158,9 +167,8 @@ step-1 label mix within noise of blind-1.
 
 ## Stage 2: measurer owns labeling + store admission
 
-Move project_episode/sign_target into the measurer (new module or
-crate gz-measurer if it needs no lanes.rs types; decide at
-implementation -- portable payload rule applies either way). Lanes'
+Move project_episode/sign_target into gz-measurer (the crate exists
+from Stage 1; the portable-payload rule is its dependency tree). Lanes'
 complete() paths shrink to: intercept rollouts (unchanged), release
 handles, ship artifact. Drop-branches and both projection call sites
 deleted; episodes_appended/dropped accounting moves to the measurer
