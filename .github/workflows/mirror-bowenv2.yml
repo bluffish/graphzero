@@ -1,0 +1,35 @@
+name: Mirror to bowenv2
+
+on:
+  push:
+  delete:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bowenv2-mirror
+  cancel-in-progress: false
+
+jobs:
+  mirror:
+    if: github.repository == 'bluffish/graphzero'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Mirror branches and tags
+        env:
+          SOURCE_TOKEN: ${{ github.token }}
+          TARGET_TOKEN: ${{ secrets.BOWENV2_MIRROR_TOKEN }}
+        run: |
+          set -euo pipefail
+          git init --bare mirror.git
+          git -C mirror.git fetch --force --prune \
+            "https://x-access-token:${SOURCE_TOKEN}@github.com/${GITHUB_REPOSITORY}.git" \
+            '+refs/heads/*:refs/heads/*' \
+            '+refs/tags/*:refs/tags/*'
+          git -C mirror.git push --prune \
+            "https://x-access-token:${TARGET_TOKEN}@github.com/Spring-Silicon/bowenv2.git" \
+            '+refs/heads/*:refs/heads/*' \
+            '+refs/tags/*:refs/tags/*'
