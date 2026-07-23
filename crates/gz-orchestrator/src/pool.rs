@@ -1,6 +1,6 @@
 use crate::root::RootSource;
 use crate::{EpisodeId, internal};
-use gz_engine::{EngineResult, GraphEngine};
+use gz_engine::{EngineResult, GraphEngine, MeasureOptions, MeasureResult};
 use gz_eval::EvalOutput;
 use gz_features::{FeatureExtractor, FeatureRow, PositionFeatures};
 use gz_search::{
@@ -28,6 +28,14 @@ pub(crate) struct ParkedEval {
     pub row: FeatureRow,
     pub action_count: u32,
     pub pressure_reserved: bool,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ParkedMeasure<G> {
+    pub slot: usize,
+    pub token: WorkToken,
+    pub graph: G,
+    pub options: MeasureOptions,
 }
 
 pub(crate) struct Admission<'a> {
@@ -61,6 +69,7 @@ enum SlotState<G, C> {
     Parked {
         episode: ActiveEpisode<G, C>,
         evals: Vec<ParkedEvalState>,
+        measure: Option<ParkedMeasureState<G>>,
     },
 }
 
@@ -68,6 +77,13 @@ struct ParkedEvalState {
     token: WorkToken,
     row: Option<FeatureRow>,
     action_count: u32,
+    sent: bool,
+}
+
+struct ParkedMeasureState<G> {
+    token: WorkToken,
+    graph: G,
+    options: MeasureOptions,
     sent: bool,
 }
 
@@ -88,7 +104,12 @@ impl<G, C> SlotState<G, C> {
 
     fn has_parked_token(&self, token: WorkToken) -> bool {
         match self {
-            Self::Parked { evals, .. } => evals.iter().any(|eval| eval.token == token),
+            Self::Parked { evals, measure, .. } => {
+                evals.iter().any(|eval| eval.token == token)
+                    || measure
+                        .as_ref()
+                        .is_some_and(|measure| measure.token == token)
+            }
             _ => false,
         }
     }
@@ -184,6 +205,7 @@ where
         &mut self,
         engine: &mut E,
         extractor: &mut X,
+        remote_measure: bool,
     ) -> EngineResult<Vec<CompletedTask<G, C>>>
     where
         E: GraphEngine<Graph = G, Candidate = C>,
@@ -196,6 +218,7 @@ where
                 continue;
             };
             let mut parked_evals = Vec::new();
+            let mut parked_measure = None;
             loop {
                 let poll = match episode.task.poll() {
                     Ok(poll) => poll,
@@ -209,7 +232,7 @@ where
                 match poll {
                     SearchPoll::Work(work) => {
                         let token = work.token();
-                        let result = match service_engine_work(engine, &work) {
+                        let result = match service_engine_work(engine, &work, remote_measure) {
                             Ok(result) => result,
                             Err(error) => {
                                 release_task_all(engine, &mut episode.task)?;
@@ -225,65 +248,90 @@ where
                             continue;
                         }
 
-                        let SearchWork::Eval(work) = work else {
-                            release_task_all(engine, &mut episode.task)?;
-                            return Err(internal("unsupported search work"));
-                        };
-                        episode.evaluations = episode.evaluations.saturating_add(1);
-                        let action_count = match u32::try_from(work.request.actions.len()) {
-                            Ok(action_count) => action_count,
-                            Err(_) => {
-                                release_task_all(engine, &mut episode.task)?;
-                                return Err(internal("action count overflow"));
+                        match work {
+                            SearchWork::Eval(work) => {
+                                episode.evaluations = episode.evaluations.saturating_add(1);
+                                let action_count = match u32::try_from(work.request.actions.len()) {
+                                    Ok(action_count) => action_count,
+                                    Err(_) => {
+                                        release_task_all(engine, &mut episode.task)?;
+                                        return Err(internal("action count overflow"));
+                                    }
+                                };
+                                let position = position_features(
+                                    work.request.position,
+                                    work.opponent.is_some(),
+                                );
+                                let mut row = match extractor.extract(
+                                    engine,
+                                    work.graph,
+                                    &work.candidates,
+                                    position,
+                                ) {
+                                    Ok(row) => row,
+                                    Err(_) => {
+                                        release_task_all(engine, &mut episode.task)?;
+                                        return Err(internal("feature extraction failed"));
+                                    }
+                                };
+                                if let Some(opponent) = work.opponent.as_deref() {
+                                    let opponent_position =
+                                        position_features(opponent.position, false);
+                                    let opponent_row = match extractor.extract(
+                                        engine,
+                                        opponent.graph,
+                                        &[],
+                                        opponent_position,
+                                    ) {
+                                        Ok(row) => row,
+                                        Err(_) => {
+                                            release_task_all(engine, &mut episode.task)?;
+                                            return Err(internal(
+                                                "opponent feature extraction failed",
+                                            ));
+                                        }
+                                    };
+                                    row.opponent = Some(opponent_state(opponent_row));
+                                }
+                                parked_evals.push(ParkedEvalState {
+                                    token,
+                                    row: Some(row),
+                                    action_count,
+                                    sent: false,
+                                });
                             }
-                        };
-                        let position =
-                            position_features(work.request.position, work.opponent.is_some());
-                        let mut row =
-                            match extractor.extract(engine, work.graph, &work.candidates, position)
-                            {
-                                Ok(row) => row,
-                                Err(_) => {
+                            SearchWork::Measure(work) if remote_measure => {
+                                if parked_measure.is_some() || !parked_evals.is_empty() {
                                     release_task_all(engine, &mut episode.task)?;
-                                    return Err(internal("feature extraction failed"));
+                                    return Err(internal("worker produced overlapping work"));
                                 }
-                            };
-                        if let Some(opponent) = work.opponent.as_deref() {
-                            let opponent_position = position_features(opponent.position, false);
-                            let opponent_row = match extractor.extract(
-                                engine,
-                                opponent.graph,
-                                &[],
-                                opponent_position,
-                            ) {
-                                Ok(row) => row,
-                                Err(_) => {
-                                    release_task_all(engine, &mut episode.task)?;
-                                    return Err(internal("opponent feature extraction failed"));
-                                }
-                            };
-                            row.opponent = Some(opponent_state(opponent_row));
+                                parked_measure = Some(ParkedMeasureState {
+                                    token,
+                                    graph: work.graph,
+                                    options: work.options,
+                                    sent: false,
+                                });
+                            }
+                            _ => {
+                                release_task_all(engine, &mut episode.task)?;
+                                return Err(internal("unsupported search work"));
+                            }
                         }
-                        parked_evals.push(ParkedEvalState {
-                            token,
-                            row: Some(row),
-                            action_count,
-                            sent: false,
-                        });
                     }
                     SearchPoll::Blocked => {
-                        if parked_evals.is_empty() {
+                        if parked_evals.is_empty() && parked_measure.is_none() {
                             release_task_all(engine, &mut episode.task)?;
                             return Err(internal("worker blocked"));
                         }
                         slot.state = SlotState::Parked {
                             episode,
                             evals: parked_evals,
+                            measure: parked_measure,
                         };
                         break;
                     }
                     SearchPoll::Done(result) => {
-                        if !parked_evals.is_empty() {
+                        if !parked_evals.is_empty() || parked_measure.is_some() {
                             release_task_all(engine, &mut episode.task)?;
                             return Err(internal("search completed with pending evaluations"));
                         }
@@ -304,7 +352,7 @@ where
     pub(crate) fn take_unsent_parked(&mut self) -> Vec<ParkedEval> {
         let mut parked = Vec::new();
         for (index, slot) in self.slots.iter_mut().enumerate() {
-            let SlotState::Parked { episode, evals } = &mut slot.state else {
+            let SlotState::Parked { episode, evals, .. } = &mut slot.state else {
                 continue;
             };
             let mut pressure_reserved = episode.pressure_reserved;
@@ -327,6 +375,26 @@ where
         parked
     }
 
+    pub(crate) fn take_unsent_measurements(&mut self) -> Vec<ParkedMeasure<G>> {
+        let mut parked = Vec::new();
+        for (slot, state) in self.slots.iter_mut().enumerate() {
+            let SlotState::Parked { measure, .. } = &mut state.state else {
+                continue;
+            };
+            let Some(measure) = measure.as_mut().filter(|measure| !measure.sent) else {
+                continue;
+            };
+            measure.sent = true;
+            parked.push(ParkedMeasure {
+                slot,
+                token: measure.token,
+                graph: measure.graph,
+                options: measure.options,
+            });
+        }
+        parked
+    }
+
     pub(crate) fn resume<E>(
         &mut self,
         engine: &mut E,
@@ -345,9 +413,17 @@ where
         if !slot.state.has_parked_token(token) {
             return Err(internal("resume without pending work"));
         }
-        let SlotState::Parked { episode, evals } = &mut slot.state else {
+        let SlotState::Parked {
+            episode,
+            evals,
+            measure,
+        } = &mut slot.state
+        else {
             unreachable!("token check ensures the slot is parked");
         };
+        if measure.is_some() {
+            return Err(internal("eval reply for pending measurement"));
+        }
         let index = evals
             .iter()
             .position(|eval| eval.token == token)
@@ -359,12 +435,69 @@ where
             return Err(error);
         }
         release_task_releasable(engine, &mut episode.task)?;
-        if evals.is_empty() {
+        if evals.is_empty() && measure.is_none() {
             let SlotState::Parked { episode, .. } = slot.state.take() else {
                 unreachable!("slot remains parked until its final eval reply");
             };
             slot.state = SlotState::Running(episode);
         }
+        Ok(())
+    }
+
+    pub(crate) fn resume_measure<E>(
+        &mut self,
+        engine: &mut E,
+        slot_index: usize,
+        token: WorkToken,
+        result: EngineResult<MeasureResult<G>>,
+    ) -> EngineResult<()>
+    where
+        E: GraphEngine<Graph = G, Candidate = C>,
+    {
+        let slot = self
+            .slots
+            .get_mut(slot_index)
+            .ok_or_else(|| internal("unknown work token"))?;
+        if !slot.state.has_parked_token(token) {
+            return Err(internal("resume without pending work"));
+        }
+        let SlotState::Parked {
+            episode,
+            evals,
+            measure,
+        } = &mut slot.state
+        else {
+            unreachable!("token check ensures the slot is parked");
+        };
+        if !evals.is_empty()
+            || measure
+                .as_ref()
+                .is_none_or(|measure| measure.token != token)
+        {
+            return Err(internal("measure reply for different pending work"));
+        }
+        let output = match result {
+            Ok(output) => output,
+            Err(error) => {
+                release_task_all(engine, &mut episode.task)?;
+                slot.state = SlotState::Idle;
+                return Err(error);
+            }
+        };
+        *measure = None;
+        if let Err(error) = episode
+            .task
+            .resume(token, SearchWorkResult::Measure(output))
+        {
+            release_task_all(engine, &mut episode.task)?;
+            slot.state = SlotState::Idle;
+            return Err(error);
+        }
+        release_task_releasable(engine, &mut episode.task)?;
+        let SlotState::Parked { episode, .. } = slot.state.take() else {
+            unreachable!("slot remains parked until its measurement reply");
+        };
+        slot.state = SlotState::Running(episode);
         Ok(())
     }
 
@@ -451,6 +584,7 @@ where
 fn service_engine_work<E>(
     engine: &mut E,
     work: &SearchWork<E::Graph, E::Candidate>,
+    remote_measure: bool,
 ) -> EngineResult<Option<SearchWorkResult<E::Graph, E::Candidate>>>
 where
     E: GraphEngine,
@@ -462,6 +596,7 @@ where
         SearchWork::Apply(work) => engine
             .apply(work.graph, work.candidate)
             .map(|result| Some(SearchWorkResult::Apply(result))),
+        SearchWork::Measure(_) if remote_measure => Ok(None),
         SearchWork::Measure(work) => engine
             .measure(work.graph, work.options)
             .map(|result| Some(SearchWorkResult::Measure(result))),

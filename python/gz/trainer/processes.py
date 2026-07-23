@@ -43,6 +43,26 @@ def spawn_replay_serve(config: RunConfig) -> subprocess.Popen[bytes]:
 
 
 def spawn_torch_selfplay(config: RunConfig) -> subprocess.Popen[bytes]:
+    measurement_args: list[str] = []
+    if config.measurement.enabled:
+        measurement_args = [
+            "--measure-listen",
+            config.measurement.listen,
+            "--measure-server-cert",
+            config.measurement.server_cert,
+            "--measure-server-key",
+            config.measurement.server_key,
+            "--measure-client-ca",
+            config.measurement.client_ca,
+            "--measure-profile",
+            config.measurement.profile,
+            "--measure-receipt-dir",
+            config.measurement.receipt_dir,
+            "--measure-startup-timeout-ms",
+            str(config.measurement.startup_timeout_ms),
+        ]
+        for agent in config.measurement.agents:
+            measurement_args.extend(("--measure-agent", agent))
     return subprocess.Popen(
         [
             config.paths.graphzero_bin,
@@ -114,6 +134,7 @@ def spawn_torch_selfplay(config: RunConfig) -> subprocess.Popen[bytes]:
                 if config.selfplay.replay_retain
                 else []
             ),
+            *measurement_args,
         ],
         # Selfplay spawns the evaluator child; a new session lets kill_child
         # take down the whole group instead of orphaning the evaluator.

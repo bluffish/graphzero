@@ -4,6 +4,8 @@ members = [
     "crates/gz-engine-whittle",
     "crates/gz-features",
     "crates/gz-eval-service",
+    "crates/gz-measure-service",
+    "crates/gz-measure-agent",
     "crates/gz-search",
     "crates/gz-eval",
     "crates/gz-measurer",

@@ -3,7 +3,7 @@ from __future__ import annotations
 import math
 import os
 import tomllib
-from dataclasses import dataclass, fields
+from dataclasses import dataclass, fields, replace
 from pathlib import Path
 
 from gz.model.exphormer import ArchConfig
@@ -134,6 +134,19 @@ class SelfplayConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class MeasurementConfig:
+    enabled: bool = False
+    listen: str = "0.0.0.0:50051"
+    server_cert: str = ""
+    server_key: str = ""
+    client_ca: str = ""
+    agents: tuple[str, ...] = ()
+    profile: str = ""
+    receipt_dir: str = ""
+    startup_timeout_ms: int = 60_000
+
+
+@dataclass(frozen=True, slots=True)
 class WandbConfig:
     project: str = ""
     entity: str = ""
@@ -160,6 +173,7 @@ class RunConfig:
     paths: PathsConfig
     wandb: WandbConfig
     arch: ArchConfig
+    measurement: MeasurementConfig
 
 
 def resolved_trainer_seeds(config: TrainerConfig) -> tuple[int, int]:
@@ -348,6 +362,33 @@ def _validate(config: RunConfig) -> RunConfig:
         raise ValueError("symmetric selfplay requires state_input = 'joint-board'")
     if config.arch.value_input != "single":
         raise ValueError("symmetric selfplay requires value_input = 'single'")
+    if config.measurement.enabled:
+        if not config.measurement.listen:
+            raise ValueError("measurement.listen is required")
+        for name, value in (
+            ("server_cert", config.measurement.server_cert),
+            ("server_key", config.measurement.server_key),
+            ("client_ca", config.measurement.client_ca),
+            ("profile", config.measurement.profile),
+            ("receipt_dir", config.measurement.receipt_dir),
+        ):
+            if not value:
+                raise ValueError(f"measurement.{name} is required")
+        if not config.measurement.agents:
+            raise ValueError("measurement.agents must contain at least one device")
+        for agent in config.measurement.agents:
+            device_id, separator, certificate = agent.partition("=")
+            if (
+                not separator
+                or len(device_id) != 32
+                or any(character not in "0123456789abcdefABCDEF" for character in device_id)
+                or not certificate
+            ):
+                raise ValueError(
+                    "measurement.agents entries must be DEVICE_ID=CERTIFICATE_PATH"
+                )
+        if config.measurement.startup_timeout_ms < 1:
+            raise ValueError("measurement.startup_timeout_ms must be positive")
     return config
 
 
@@ -359,7 +400,7 @@ def load_config(
     data = load_config_table(Path(path))
     unknown_sections = (
         set(data)
-        - {"trainer", "selfplay", "wandb", "arch", "paths"}
+        - {"trainer", "selfplay", "wandb", "arch", "paths", "measurement"}
         - extension_sections
     )
     if unknown_sections:
@@ -374,6 +415,10 @@ def load_config(
     )
     wandb = dataclass_from_dict(WandbConfig, data.get("wandb", {}))
     arch = ArchConfig.from_config_dict(data.get("arch", {}))
+    measurement = dataclass_from_dict(
+        MeasurementConfig,
+        data.get("measurement", {}),
+    )
     raw_paths = data.get("paths", {})
     if not isinstance(raw_paths, dict):
         raise ValueError("[paths] must be a table")
@@ -406,6 +451,23 @@ def load_config(
     checkpoint_dir = checkpoint_dir.absolute()
     actor_checkpoint_dir = actor_checkpoint_dir.absolute()
     sample_socket = sample_socket.absolute()
+    if measurement.enabled:
+        agents = []
+        for agent in measurement.agents:
+            device_id, separator, certificate = agent.partition("=")
+            agents.append(
+                f"{device_id}{separator}{Path(certificate).absolute()}"
+                if separator
+                else agent
+            )
+        measurement = replace(
+            measurement,
+            server_cert=str(Path(measurement.server_cert).absolute()),
+            server_key=str(Path(measurement.server_key).absolute()),
+            client_ca=str(Path(measurement.client_ca).absolute()),
+            agents=tuple(agents),
+            receipt_dir=str(Path(measurement.receipt_dir).absolute()),
+        )
     return _validate(
         RunConfig(
             trainer=trainer,
@@ -420,6 +482,7 @@ def load_config(
             ),
             wandb=wandb,
             arch=arch,
+            measurement=measurement,
         )
     )
 

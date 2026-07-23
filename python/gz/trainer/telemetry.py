@@ -357,6 +357,7 @@ class WandbRun:
             run_config = {
                 "trainer": asdict(config.trainer),
                 "selfplay": asdict(config.selfplay),
+                "measurement": asdict(config.measurement),
                 "arch": asdict(config.arch),
                 "run_dir": str(config.paths.run_dir),
             }

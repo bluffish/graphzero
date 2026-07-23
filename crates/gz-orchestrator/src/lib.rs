@@ -6,6 +6,7 @@ pub mod admission;
 mod ids;
 mod lanes;
 mod leases;
+mod measurement;
 mod pool;
 mod root;
 
@@ -15,6 +16,7 @@ pub use lanes::{
     FeaturizedRuntime, ReplayBackpressure, ReplayRuntime, ThreadedGumbelOrchestrator,
     ThreadedOrchestratorConfig, ThreadedReplayRun,
 };
+pub use measurement::{MeasureSubmissionEncoder, RemoteMeasurementRuntime};
 pub use root::RootSource;
 
 pub(crate) fn internal(message: &'static str) -> gz_engine::EngineError {

@@ -9,5 +9,7 @@ gz-eval = { path = "../gz-eval" }
 gz-eval-service = { path = "../gz-eval-service" }
 gz-features = { path = "../gz-features" }
 gz-measurer = { path = "../gz-measurer" }
+gz-measure-service = { path = "../gz-measure-service" }
 gz-replay = { path = "../gz-replay" }
 gz-search = { path = "../gz-search" }
+tokio = { version = "1.48.0", features = ["rt-multi-thread", "sync"] }

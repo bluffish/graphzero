@@ -2,11 +2,13 @@ use super::projection::{
     append_symmetric_replay_job, feature_rows_for_symmetric_episode, measured_symmetric_game,
     release_symmetric_episode_handles,
 };
-use super::{EvalReply, FeaturizedEvalJob, ReplayBackpressure, ReplayJob, ReplayLaneSummary};
+use super::{FeaturizedEvalJob, LaneReply, ReplayBackpressure, ReplayJob, ReplayLaneSummary};
 use crate::EpisodeId;
+use crate::MeasureSubmissionEncoder;
 use crate::admission::{AdmissionPacer, EvalPressure, SharedAdmissionShaper};
 use crate::internal;
 use crate::leases::{EpisodeModelLeases, ModelLeaseRegistry};
+use crate::measurement::RemoteMeasureJob;
 use crate::pool::{Admission, AdmissionResult, CompletedTask, WorkerPool};
 use crate::root::RootSource;
 use gz_engine::{EngineIdentity, EngineResult, GraphEngine};
@@ -17,10 +19,11 @@ use gz_search::GumbelMcts;
 use std::collections::HashMap;
 use std::num::NonZeroUsize;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{Receiver, RecvTimeoutError, SyncSender, TryRecvError};
 use std::time::{Duration, Instant};
 
-pub(super) struct LaneRuntime<'a> {
+pub(super) struct LaneRuntime<'a, E: GraphEngine> {
     pub(super) lane: usize,
     pub(super) lanes: usize,
     pub(super) search: &'a GumbelMcts,
@@ -29,8 +32,11 @@ pub(super) struct LaneRuntime<'a> {
     pub(super) admission_stagger: Duration,
     pub(super) admission_shaper: Option<Arc<SharedAdmissionShaper>>,
     pub(super) eval_pressure: Arc<EvalPressure>,
+    pub(super) pipeline_closed: Arc<AtomicBool>,
     pub(super) intake_tx: SyncSender<FeaturizedEvalJob>,
-    pub(super) reply_rx: Receiver<EvalReply>,
+    pub(super) reply_rx: Receiver<LaneReply<E::Graph>>,
+    pub(super) measure_tx: Option<tokio::sync::mpsc::Sender<RemoteMeasureJob<E::Graph>>>,
+    pub(super) measure_encoder: Option<Arc<dyn MeasureSubmissionEncoder<E>>>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -63,7 +69,7 @@ where
 pub(super) fn run_lane_pipeline<E, R, X>(
     mut engine: E,
     mut roots: R,
-    runtime: LaneRuntime<'_>,
+    runtime: LaneRuntime<'_, E>,
     mut mode: FeaturizedReplayMode<'_, X>,
 ) -> EngineResult<ReplayLaneSummary>
 where
@@ -82,6 +88,9 @@ where
         runtime.admission_stagger,
     );
     loop {
+        if runtime.pipeline_closed.load(Ordering::Acquire) {
+            return Err(internal("worker pipeline unavailable"));
+        }
         let mut adaptive_retry_after = None;
         if !roots_exhausted {
             let gate_open = mode.gate_open();
@@ -156,7 +165,7 @@ where
             }
         }
 
-        for completed in mode.drive(&mut engine, &mut pool)? {
+        for completed in mode.drive(&mut engine, &mut pool, runtime.measure_encoder.is_some())? {
             let episode_work = mode.complete(&mut engine, runtime.search, completed)?;
             if let (Some(shaper), Some(evaluations)) = (&runtime.admission_shaper, episode_work) {
                 shaper.observe_episode_work(evaluations)?;
@@ -168,6 +177,13 @@ where
             &mut pool,
             &runtime.intake_tx,
             &runtime.eval_pressure,
+        )?;
+        send_measurements(
+            runtime.lane,
+            &engine,
+            &mut pool,
+            runtime.measure_tx.as_ref(),
+            runtime.measure_encoder.as_deref(),
         )?;
 
         if roots_exhausted && !pool.active() {
@@ -181,7 +197,13 @@ where
             !roots_exhausted && available_learner_slots(&pool, runtime.workers_per_lane.get()) > 0
         });
         if pool.has_parked() {
-            receive_replies(&mut engine, &mut pool, &runtime.reply_rx, reply_wait)?;
+            receive_replies(
+                &mut engine,
+                &mut pool,
+                &runtime.reply_rx,
+                &runtime.pipeline_closed,
+                reply_wait,
+            )?;
         }
     }
 }
@@ -250,12 +272,13 @@ impl<'a, X> FeaturizedReplayMode<'a, X> {
         &mut self,
         engine: &mut E,
         pool: &mut WorkerPool<E::Graph, E::Candidate>,
+        remote_measure: bool,
     ) -> EngineResult<Vec<CompletedTask<E::Graph, E::Candidate>>>
     where
         E: GraphEngine,
         X: FeatureExtractor<E>,
     {
-        pool.drive(engine, &mut self.extractor)
+        pool.drive(engine, &mut self.extractor, remote_measure)
     }
 
     fn send_parked<G, C>(
@@ -352,6 +375,38 @@ where
     Ok(())
 }
 
+fn send_measurements<E>(
+    lane: usize,
+    engine: &E,
+    pool: &mut WorkerPool<E::Graph, E::Candidate>,
+    intake_tx: Option<&tokio::sync::mpsc::Sender<RemoteMeasureJob<E::Graph>>>,
+    encoder: Option<&dyn MeasureSubmissionEncoder<E>>,
+) -> EngineResult<()>
+where
+    E: GraphEngine,
+{
+    let pending = pool.take_unsent_measurements();
+    if pending.is_empty() {
+        return Ok(());
+    }
+    let intake_tx = intake_tx.ok_or_else(|| internal("missing remote measure gateway"))?;
+    let encoder = encoder.ok_or_else(|| internal("missing measure submission encoder"))?;
+    for parked in pending {
+        let submission = encoder.encode(engine, parked.graph, parked.options)?;
+        intake_tx
+            .blocking_send(RemoteMeasureJob {
+                lane,
+                slot: parked.slot,
+                token: parked.token,
+                graph: parked.graph,
+                options: parked.options,
+                submission,
+            })
+            .map_err(|_| internal("measure gateway unavailable"))?;
+    }
+    Ok(())
+}
+
 pub(super) fn merge_lane_measurer_summary(
     lane: &mut ReplayLaneSummary,
     measurer: &MeasurerRunSummary,
@@ -368,33 +423,53 @@ pub(super) fn merge_lane_measurer_summary(
 fn receive_replies<E>(
     engine: &mut E,
     pool: &mut WorkerPool<E::Graph, E::Candidate>,
-    reply_rx: &Receiver<EvalReply>,
+    reply_rx: &Receiver<LaneReply<E::Graph>>,
+    pipeline_closed: &AtomicBool,
     wait: Option<Duration>,
 ) -> EngineResult<()>
 where
     E: GraphEngine,
 {
-    let reply = match wait {
-        Some(wait) => match reply_rx.recv_timeout(wait) {
-            Ok(reply) => reply,
-            Err(RecvTimeoutError::Timeout) => return Ok(()),
-            Err(RecvTimeoutError::Disconnected) => {
-                return Err(internal("eval backend unavailable"));
-            }
-        },
-        None => reply_rx
-            .recv()
-            .map_err(|_| internal("eval backend unavailable"))?,
+    if pipeline_closed.load(Ordering::Acquire) {
+        return Err(internal("worker pipeline unavailable"));
+    }
+    let poll = Duration::from_millis(100);
+    let timeout = wait.map_or(poll, |wait| wait.min(poll));
+    let reply = match reply_rx.recv_timeout(timeout) {
+        Ok(reply) => reply,
+        Err(RecvTimeoutError::Timeout) if pipeline_closed.load(Ordering::Acquire) => {
+            return Err(internal("worker pipeline unavailable"));
+        }
+        Err(RecvTimeoutError::Timeout) => return Ok(()),
+        Err(RecvTimeoutError::Disconnected) => {
+            return Err(internal("worker pipeline unavailable"));
+        }
     };
-    pool.resume(engine, reply.slot, reply.token, reply.output)?;
+    resume_reply(engine, pool, reply)?;
 
     loop {
         match reply_rx.try_recv() {
             Ok(reply) => {
-                pool.resume(engine, reply.slot, reply.token, reply.output)?;
+                resume_reply(engine, pool, reply)?;
             }
             Err(TryRecvError::Empty) => return Ok(()),
             Err(TryRecvError::Disconnected) => return Err(internal("eval backend unavailable")),
+        }
+    }
+}
+
+fn resume_reply<E>(
+    engine: &mut E,
+    pool: &mut WorkerPool<E::Graph, E::Candidate>,
+    reply: LaneReply<E::Graph>,
+) -> EngineResult<()>
+where
+    E: GraphEngine,
+{
+    match reply {
+        LaneReply::Eval(reply) => pool.resume(engine, reply.slot, reply.token, reply.output),
+        LaneReply::Measure(reply) => {
+            pool.resume_measure(engine, reply.slot, reply.token, reply.result)
         }
     }
 }

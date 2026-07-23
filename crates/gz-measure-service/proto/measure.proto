@@ -1,0 +1,360 @@
+syntax = "proto3";
+
+package graphzero.measure.v1;
+
+service MeasureFleet {
+  rpc Connect(stream AgentEvent) returns (stream CoordinatorCommand);
+  rpc FetchArtifact(FetchArtifactRequest) returns (stream ArtifactChunk);
+  rpc SubmitResult(SubmitResultRequest) returns (SubmitResultAck);
+}
+
+message EngineIdentity {
+  bytes engine_id = 1;
+  bytes engine_version = 2;
+  bytes action_set_hash = 3;
+}
+
+enum GraphArtifactFormatKind {
+  GRAPH_ARTIFACT_FORMAT_UNSPECIFIED = 0;
+  GRAPH_ARTIFACT_FORMAT_TEXT = 1;
+  GRAPH_ARTIFACT_FORMAT_JSON = 2;
+  GRAPH_ARTIFACT_FORMAT_DOT = 3;
+  GRAPH_ARTIFACT_FORMAT_BINARY = 4;
+  GRAPH_ARTIFACT_FORMAT_ADAPTER_SPECIFIC = 5;
+}
+
+message ArtifactFormatCapability {
+  GraphArtifactFormatKind format_kind = 1;
+  uint32 adapter_format_id = 2;
+}
+
+message EngineCapability {
+  EngineIdentity engine = 1;
+  repeated ArtifactFormatCapability artifact_formats = 2;
+  repeated uint32 measure_config_encodings = 3;
+  repeated uint32 measurement_protocol_versions = 4;
+}
+
+message DeviceProfile {
+  string platform_family = 1;
+  string board_model = 2;
+  string soc = 3;
+  string gpu_architecture = 4;
+  uint64 usable_memory_bytes = 5;
+  bytes operating_system_image_digest = 6;
+  string platform_release = 7;
+  string cuda_version = 8;
+  string gpu_driver_version = 9;
+  string compiler_version = 10;
+  string compiler_runtime_version = 11;
+  bytes agent_image_digest = 12;
+  string power_profile = 13;
+  string clock_policy = 14;
+  string cooling_policy = 15;
+  uint32 measurement_protocol_version = 16;
+}
+
+message AgentEvent {
+  oneof event {
+    AgentHello hello = 1;
+    AgentReady ready = 2;
+    JobAccepted accepted = 3;
+    JobRejected rejected = 4;
+    JobHeartbeat heartbeat = 5;
+    AgentDraining draining = 6;
+  }
+}
+
+message CoordinatorCommand {
+  oneof command {
+    AgentWelcome welcome = 1;
+    MeasureLease lease = 2;
+    CancelLease cancel = 3;
+    DrainAgent drain = 4;
+    ProtocolError error = 5;
+  }
+}
+
+message AgentHello {
+  uint32 protocol_major = 1;
+  uint32 protocol_minor = 2;
+  bytes device_id = 3;
+  string agent_build = 4;
+  DeviceProfile profile = 5;
+  repeated EngineCapability capabilities = 6;
+  repeated LeaseRecovery recoveries = 7;
+}
+
+message AgentWelcome {
+  bytes session_id = 1;
+  uint32 negotiated_minor = 2;
+  bytes device_profile_hash = 3;
+  uint64 heartbeat_interval_ms = 4;
+  uint64 accept_timeout_ms = 5;
+  uint64 default_lease_duration_ms = 6;
+  uint64 max_artifact_bytes = 7;
+  uint32 artifact_chunk_bytes = 8;
+  uint32 max_measure_config_bytes = 9;
+  uint32 max_engine_metadata_bytes = 10;
+  uint32 max_samples_per_subject = 11;
+  uint32 max_telemetry_samples = 12;
+  uint32 max_bounded_string_bytes = 13;
+  repeated RecoveryDisposition recoveries = 14;
+}
+
+message AgentReady {
+  bytes session_id = 1;
+  uint32 free_slots = 2;
+  DeviceTelemetry telemetry = 3;
+}
+
+enum MeasureKind {
+  MEASURE_KIND_UNSPECIFIED = 0;
+  MEASURE_KIND_SINGLE = 1;
+  MEASURE_KIND_SYMMETRIC_PAIR = 2;
+}
+
+message MeasureLease {
+  bytes session_id = 1;
+  bytes job_id = 2;
+  bytes measurement_key = 3;
+  bytes request_nonce = 4;
+  bytes lease_id = 5;
+  uint64 lease_duration_ms = 6;
+  MeasureKind kind = 7;
+  EngineIdentity engine = 8;
+  bytes measure_config_hash = 9;
+  uint32 measure_config_encoding = 10;
+  bytes measure_config_payload = 11;
+  bytes target_device_profile_hash = 12;
+  repeated GraphSubject subjects = 13;
+}
+
+message GraphSubject {
+  uint32 logical_index = 1;
+  bytes graph_hash = 2;
+  GraphArtifactRef artifact = 3;
+}
+
+message GraphArtifactRef {
+  bytes artifact_digest = 1;
+  uint64 artifact_size = 2;
+  GraphArtifactFormatKind format_kind = 3;
+  uint32 adapter_format_id = 4;
+}
+
+message JobAccepted {
+  bytes session_id = 1;
+  bytes job_id = 2;
+  bytes lease_id = 3;
+}
+
+enum JobRejectReason {
+  JOB_REJECT_UNSPECIFIED = 0;
+  JOB_REJECT_PROFILE_CHANGED = 1;
+  JOB_REJECT_UNSUPPORTED_ENGINE = 2;
+  JOB_REJECT_UNSUPPORTED_ARTIFACT = 3;
+  JOB_REJECT_UNSUPPORTED_CONFIG = 4;
+  JOB_REJECT_ARTIFACT_TOO_LARGE = 5;
+  JOB_REJECT_INSUFFICIENT_MEMORY = 6;
+  JOB_REJECT_NOT_READY = 7;
+  JOB_REJECT_AGENT_INTERNAL = 8;
+}
+
+message JobRejected {
+  bytes session_id = 1;
+  bytes job_id = 2;
+  bytes lease_id = 3;
+  JobRejectReason reason = 4;
+  string bounded_message = 5;
+}
+
+enum JobPhase {
+  JOB_PHASE_UNSPECIFIED = 0;
+  JOB_PHASE_FETCH_ARTIFACT = 1;
+  JOB_PHASE_VERIFY_ARTIFACT = 2;
+  JOB_PHASE_COMPILE = 3;
+  JOB_PHASE_CAPTURE = 4;
+  JOB_PHASE_WARMUP = 5;
+  JOB_PHASE_MEASURE = 6;
+  JOB_PHASE_VALIDATE = 7;
+  JOB_PHASE_PERSIST_REPORT = 8;
+  JOB_PHASE_SUBMIT_REPORT = 9;
+}
+
+message JobHeartbeat {
+  bytes session_id = 1;
+  bytes job_id = 2;
+  bytes lease_id = 3;
+  JobPhase phase = 4;
+  uint64 phase_elapsed_ms = 5;
+  DeviceTelemetry telemetry = 6;
+}
+
+message AgentDraining {
+  bytes session_id = 1;
+}
+
+enum CancelReason {
+  CANCEL_UNSPECIFIED = 0;
+  CANCEL_CALLER_DEADLINE = 1;
+  CANCEL_RUN_ABORTED = 2;
+  CANCEL_DEVICE_UNHEALTHY = 3;
+  CANCEL_ADMINISTRATIVE = 4;
+  CANCEL_SUPERSEDED = 5;
+}
+
+message CancelLease {
+  bytes job_id = 1;
+  bytes lease_id = 2;
+  CancelReason reason = 3;
+}
+
+message DrainAgent {
+  bool cancel_active = 1;
+}
+
+message ProtocolError {
+  string bounded_message = 1;
+}
+
+message FetchArtifactRequest {
+  bytes session_id = 1;
+  bytes job_id = 2;
+  bytes lease_id = 3;
+  bytes artifact_digest = 4;
+  uint64 offset = 5;
+}
+
+message ArtifactChunk {
+  bytes artifact_digest = 1;
+  uint64 total_size = 2;
+  uint64 offset = 3;
+  bytes data = 4;
+}
+
+enum MeasureAttemptOutcome {
+  MEASURE_OUTCOME_UNSPECIFIED = 0;
+  MEASURE_OUTCOME_SUCCEEDED = 1;
+  MEASURE_OUTCOME_ENVIRONMENT_INVALID = 2;
+  MEASURE_OUTCOME_UNSTABLE = 3;
+  MEASURE_OUTCOME_COMPILE_FAILED = 4;
+  MEASURE_OUTCOME_CAPTURE_FAILED = 5;
+  MEASURE_OUTCOME_EXECUTION_FAILED = 6;
+  MEASURE_OUTCOME_TIMEOUT = 7;
+  MEASURE_OUTCOME_OUT_OF_MEMORY = 8;
+  MEASURE_OUTCOME_CANCELLED = 9;
+  MEASURE_OUTCOME_UNSUPPORTED = 10;
+  MEASURE_OUTCOME_AGENT_INTERNAL = 11;
+}
+
+message SubmitResultRequest {
+  bytes current_session_id = 1;
+  MeasureReport report = 2;
+}
+
+message MeasureReport {
+  bytes origin_session_id = 1;
+  bytes device_id = 2;
+  bytes device_profile_hash = 3;
+  bytes job_id = 4;
+  bytes measurement_key = 5;
+  bytes request_nonce = 6;
+  bytes lease_id = 7;
+  EngineIdentity engine = 8;
+  bytes measure_config_hash = 9;
+  MeasureKind kind = 10;
+  MeasureAttemptOutcome outcome = 11;
+  repeated SubjectMeasurement subjects = 12;
+  repeated MeasurementSample samples = 13;
+  repeated TelemetrySample telemetry = 14;
+  FailureDetail failure = 15;
+}
+
+message SubjectMeasurement {
+  uint32 logical_index = 1;
+  bytes graph_hash = 2;
+  optional uint64 compile_elapsed_ns = 3;
+  optional uint64 capture_elapsed_ns = 4;
+  optional double scalar_reward = 5;
+  bytes engine_metadata = 6;
+}
+
+message MeasurementSample {
+  uint32 schedule_index = 1;
+  uint32 logical_index = 2;
+  uint32 subject_sample_index = 3;
+  uint64 gpu_elapsed_ns = 4;
+  uint64 end_to_end_elapsed_ns = 5;
+}
+
+message TelemetrySample {
+  uint64 attempt_elapsed_ms = 1;
+  JobPhase phase = 2;
+  DeviceTelemetry telemetry = 3;
+}
+
+message FailureDetail {
+  uint32 engine_error_code = 1;
+  string bounded_message = 2;
+  bool agent_considers_retriable = 3;
+}
+
+message DeviceTelemetry {
+  uint64 monotonic_uptime_ms = 1;
+  optional uint64 gpu_clock_hz = 2;
+  optional uint64 memory_controller_clock_hz = 3;
+  optional uint64 free_device_memory_bytes = 4;
+  optional uint64 free_host_memory_bytes = 5;
+  optional uint64 throttle_flags = 6;
+  string active_power_mode = 7;
+  repeated ThermalReading temperatures = 8;
+  repeated PowerRailReading power_rails = 9;
+}
+
+message ThermalReading {
+  string zone = 1;
+  sint32 millidegrees_celsius = 2;
+}
+
+message PowerRailReading {
+  string rail = 1;
+  uint64 milliwatts = 2;
+}
+
+enum ResultDisposition {
+  RESULT_DISPOSITION_UNSPECIFIED = 0;
+  RESULT_JOB_COMMITTED = 1;
+  RESULT_ATTEMPT_RECORDED = 2;
+  RESULT_ALREADY_COMMITTED = 3;
+  RESULT_STALE_LEASE = 4;
+  RESULT_UNKNOWN_JOB = 5;
+  RESULT_INVALID_REPORT = 6;
+}
+
+message SubmitResultAck {
+  ResultDisposition disposition = 1;
+  bool agent_may_delete_report = 2;
+  string bounded_message = 3;
+}
+
+message LeaseRecovery {
+  bytes job_id = 1;
+  bytes lease_id = 2;
+  JobPhase phase = 3;
+  bool report_persisted = 4;
+}
+
+enum RecoveryAction {
+  RECOVERY_UNSPECIFIED = 0;
+  RECOVERY_CONTINUE = 1;
+  RECOVERY_SUBMIT_REPORT = 2;
+  RECOVERY_CANCEL = 3;
+  RECOVERY_ALREADY_COMMITTED = 4;
+}
+
+message RecoveryDisposition {
+  bytes job_id = 1;
+  bytes lease_id = 2;
+  RecoveryAction action = 3;
+}

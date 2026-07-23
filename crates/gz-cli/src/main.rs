@@ -1,7 +1,9 @@
 #![forbid(unsafe_code)]
 
 use gz_cli::distill::{DistillGenerateConfig, generate as generate_distill};
+use gz_cli::remote_measure::RemoteAgentEnrollment;
 use gz_cli::selfplay::{ReplayInitConfig, SelfplayConfig, init_replay, run};
+use gz_measure_service::DeviceId;
 
 // glibc malloc is pathological for this binary either way: default
 // per-thread arenas retain ~17 MB/s of fragmentation across ~300 threads,
@@ -11,6 +13,8 @@ use gz_cli::selfplay::{ReplayInitConfig, SelfplayConfig, init_replay, run};
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 use gz_cli::serve::{ReplayServeConfig, run as run_replay_serve};
 use std::path::PathBuf;
+use std::str::FromStr;
+use std::time::Duration;
 
 fn main() {
     let mut args = std::env::args().skip(1);
@@ -207,6 +211,39 @@ fn parse_selfplay(args: Vec<String>) -> Result<SelfplayConfig, String> {
             "--eval-processes" => config.eval_processes = parse_usize(flag, value)?,
             "--admission-stagger-ms" => config.admission_stagger_ms = parse_u64(flag, value)?,
             "--admission-smoothing" => config.admission_smoothing = parse_bool(flag, value)?,
+            "--measure-listen" => {
+                config.remote_measure.listen = Some(
+                    value
+                        .parse()
+                        .map_err(|_| "--measure-listen expects HOST:PORT".to_owned())?,
+                );
+            }
+            "--measure-server-cert" => {
+                config.remote_measure.server_certificate = Some(PathBuf::from(value));
+            }
+            "--measure-server-key" => {
+                config.remote_measure.server_private_key = Some(PathBuf::from(value));
+            }
+            "--measure-client-ca" => {
+                config.remote_measure.client_ca = Some(PathBuf::from(value));
+            }
+            "--measure-agent" => {
+                let (device_id, certificate) = value.split_once('=').ok_or_else(|| {
+                    "--measure-agent expects DEVICE_ID=CERTIFICATE_PATH".to_owned()
+                })?;
+                config.remote_measure.agents.push(RemoteAgentEnrollment {
+                    device_id: DeviceId::from_str(device_id).map_err(|error| error.to_string())?,
+                    certificate: PathBuf::from(certificate),
+                });
+            }
+            "--measure-profile" => config.remote_measure.profile = Some(value.clone()),
+            "--measure-receipt-dir" => {
+                config.remote_measure.receipt_dir = Some(PathBuf::from(value));
+            }
+            "--measure-startup-timeout-ms" => {
+                config.remote_measure.startup_timeout =
+                    Duration::from_millis(parse_u64(flag, value)?);
+            }
             _ => return Err(format!("unknown flag: {flag}\n{}", usage())),
         }
     }
@@ -243,5 +280,5 @@ fn parse_bool(flag: &str, value: &str) -> Result<bool, String> {
 }
 
 fn usage() -> &'static str {
-    "usage: graphzero selfplay --replay-dir PATH [--episodes N; 0 = unbounded] [--lanes L] [--workers-per-lane W] [--evaluator stub|process-stub|torch] [--python-dir PATH] [--checkpoint-dir DIR] [--checkpoint-pointer FILE] [--eval-device DEV] [--eval-poll-interval SECS] [--seed S] [--max-steps M] [--simulations K] [--max-considered M] [--gumbel-scale G] [--c-visit C] [--c-scale C] [--gumbel-noise-overlap V; negative disables] [--tree-reuse true|false] [--max-candidates N] [--max-batch B] [--serve-socket PATH] [--serve-max-batch B] [--replay-backlog ROWS] [--replay-retain ROWS] [--position-features true|false] [--no-backtrack true|false] [--mask-stop true|false] [--eval-processes N] [--admission-stagger-ms MS] [--admission-smoothing true|false]\n       graphzero replay-init --replay-dir PATH [--max-candidates N]\n       graphzero distill-generate --replay-dir PATH [--states N] [--workers N] [--max-attempts N; 0 = 10x states] [--teacher reducing-uniform] [--seed S] [--max-candidates N] [--max-steps N] [--position-features true|false]\n       graphzero replay-serve --replay-dir PATH --socket PATH --max-batch B"
+    "usage: graphzero selfplay --replay-dir PATH [--episodes N; 0 = unbounded] [--lanes L] [--workers-per-lane W] [--evaluator stub|process-stub|torch] [--python-dir PATH] [--checkpoint-dir DIR] [--checkpoint-pointer FILE] [--eval-device DEV] [--eval-poll-interval SECS] [--seed S] [--max-steps M] [--simulations K] [--max-considered M] [--gumbel-scale G] [--c-visit C] [--c-scale C] [--gumbel-noise-overlap V; negative disables] [--tree-reuse true|false] [--max-candidates N] [--max-batch B] [--serve-socket PATH] [--serve-max-batch B] [--replay-backlog ROWS] [--replay-retain ROWS] [--position-features true|false] [--no-backtrack true|false] [--mask-stop true|false] [--eval-processes N] [--admission-stagger-ms MS] [--admission-smoothing true|false] [--measure-listen HOST:PORT --measure-server-cert PATH --measure-server-key PATH --measure-client-ca PATH --measure-agent DEVICE_ID=CERT_PATH ... --measure-profile NAME --measure-receipt-dir PATH --measure-startup-timeout-ms MS]\n       graphzero replay-init --replay-dir PATH [--max-candidates N]\n       graphzero distill-generate --replay-dir PATH [--states N] [--workers N] [--max-attempts N; 0 = 10x states] [--teacher reducing-uniform] [--seed S] [--max-candidates N] [--max-steps N] [--position-features true|false]\n       graphzero replay-serve --replay-dir PATH --socket PATH --max-batch B"
 }

@@ -393,6 +393,16 @@ tree_reuse = true
 mask_stop = true
 actor_checkpoint_pointer = "step_50000.json"
 eval_poll_interval = 0.0
+[measurement]
+enabled = true
+listen = "0.0.0.0:50051"
+server_cert = "tls/server.pem"
+server_key = "tls/server.key"
+client_ca = "tls/ca.pem"
+agents = ["11111111111111111111111111111111=tls/agent.pem"]
+profile = "agxthor-whittle"
+receipt_dir = "measure-receipts"
+startup_timeout_ms = 1234
 [paths]
 run_dir = "run"
 actor_checkpoint_dir = "frozen-actor"
@@ -421,6 +431,15 @@ graphzero_bin = "graphzero-test"
     )
     assert command[command.index("--checkpoint-pointer") + 1] == "step_50000.json"
     assert command[command.index("--eval-poll-interval") + 1] == "0.0"
+    assert command[command.index("--measure-listen") + 1] == "0.0.0.0:50051"
+    assert command[command.index("--measure-server-cert") + 1] == str(
+        Path.cwd() / "tls/server.pem"
+    )
+    assert command[command.index("--measure-agent") + 1] == (
+        f"11111111111111111111111111111111={Path.cwd() / 'tls/agent.pem'}"
+    )
+    assert command[command.index("--measure-profile") + 1] == "agxthor-whittle"
+    assert command[command.index("--measure-startup-timeout-ms") + 1] == "1234"
     assert "--reference" not in command
     assert "--training-mode" not in command
     assert calls[1][1]["start_new_session"] is True

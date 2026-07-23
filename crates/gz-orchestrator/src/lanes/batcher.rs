@@ -1,4 +1,6 @@
-use super::{EvalReply, FeaturizedBatcherContext, FeaturizedEvalJob, ThreadedOrchestratorConfig};
+use super::{
+    EvalReply, FeaturizedBatcherContext, FeaturizedEvalJob, LaneReply, ThreadedOrchestratorConfig,
+};
 use crate::admission::{EVAL_PIPELINE_DEPTH, EvalPressure};
 use crate::internal;
 use crate::leases::ModelLeaseRegistry;
@@ -22,16 +24,17 @@ use std::time::{Duration, Instant};
 /// flush window and may come up empty (every parked eval can be inside
 /// the in-flight batch, and new jobs only arrive after its replies), so
 /// the loop always progresses to receive-and-route.
-pub(super) fn run_featurized_batcher<B>(
+pub(super) fn run_featurized_batcher<B, G>(
     mut backend: B,
     mut collator: FeatureCollator,
     intake_rx: Receiver<FeaturizedEvalJob>,
-    reply_txs: Vec<SyncSender<EvalReply>>,
+    reply_txs: Vec<SyncSender<LaneReply<G>>>,
     config: ThreadedOrchestratorConfig,
     context: FeaturizedBatcherContext,
 ) -> EngineResult<Vec<usize>>
 where
     B: FeatureEvalBackend,
+    G: Send,
 {
     type Routing = BatcherRouting;
     let max_batch = collator.batch_capacity().get();
@@ -215,14 +218,14 @@ struct EvalCapacityAccounting<'a> {
     accounted_at: &'a mut Option<Instant>,
 }
 
-fn drain_oldest<B>(
+fn drain_oldest<B, G>(
     backend: &mut B,
     in_flight: &mut VecDeque<(
         BatcherRouting,
         gz_eval_service::PendingBatch,
         ModelGeneration,
     )>,
-    reply_txs: &[SyncSender<EvalReply>],
+    reply_txs: &[SyncSender<LaneReply<G>>],
     batch_sizes: &mut Vec<usize>,
     context: &FeaturizedBatcherContext,
     max_batch: usize,
@@ -230,6 +233,7 @@ fn drain_oldest<B>(
 ) -> EngineResult<()>
 where
     B: FeatureEvalBackend,
+    G: Send,
 {
     let Some((routing, pending, model)) = in_flight.pop_front() else {
         return Ok(());
@@ -252,7 +256,7 @@ where
     batch_sizes.push(completed);
 
     for ((lane, slot, token, _), row) in routing.into_iter().zip(outputs.rows) {
-        let _ = reply_txs[lane].send(EvalReply {
+        let _ = reply_txs[lane].send(LaneReply::Eval(EvalReply {
             slot,
             token,
             output: EvalOutput {
@@ -260,7 +264,7 @@ where
                 policy_logits: row.policy_logits,
                 value: row.value,
             },
-        });
+        }));
     }
     if let Some(eval_pressure) = capacity.pressure {
         let capacity_started = capacity

@@ -16,6 +16,17 @@ mask_stop = false
 tree_reuse = true
 replay_retain = 320000
 
+[measurement]
+enabled = true
+listen = "100.116.59.97:50051"
+server_cert = "runs/whittle-generated-exphormer-v2-symmetric-selfplay/measurement/tls/server.pem"
+server_key = "runs/whittle-generated-exphormer-v2-symmetric-selfplay/measurement/tls/server.key"
+client_ca = "runs/whittle-generated-exphormer-v2-symmetric-selfplay/measurement/tls/ca.pem"
+agents = ["32c296f9e742c434670169ee19c849ef=runs/whittle-generated-exphormer-v2-symmetric-selfplay/measurement/tls/agxthor.pem"]
+profile = "agxthor-whittle"
+receipt_dir = "runs/whittle-generated-exphormer-v2-symmetric-selfplay/measurement/receipts"
+startup_timeout_ms = 120000
+
 [wandb]
 run_name = "whittle-generated-exphormer-v2-symmetric-selfplay"
 

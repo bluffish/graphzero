@@ -7,10 +7,11 @@ use gz_eval_service::{
     EvaluatorProcess, EvaluatorProcessConfig, Hello, STUB_MODEL_VERSION, StubBackend,
 };
 use gz_features::FeatureSchemaHash;
+use gz_measure_agent::{named_test_profile_hash, submission as whittle_measure_submission};
 use gz_measurer::MeasureLedgerSnapshot;
 use gz_orchestrator::{
-    AdmissionSmoothingConfig, FeaturizedRuntime, ReplayBackpressure, ReplayRuntime, RootSource,
-    ThreadedGumbelOrchestrator, ThreadedOrchestratorConfig,
+    AdmissionSmoothingConfig, FeaturizedRuntime, RemoteMeasurementRuntime, ReplayBackpressure,
+    ReplayRuntime, RootSource, ThreadedGumbelOrchestrator, ThreadedOrchestratorConfig,
 };
 use gz_replay::{ReplayContract, ReplayCounters, ReplayDataMode, ReplayEpisodeId, ReplayStore};
 use gz_search::{GumbelMcts, GumbelMctsConfig, GumbelValueMode};
@@ -19,6 +20,8 @@ use std::path::PathBuf;
 use std::str::FromStr;
 use std::sync::Arc;
 use std::time::Duration;
+
+use crate::remote_measure::{RemoteCoordinator, RemoteMeasureConfig};
 
 const WHITTLE_FEATURE_MAX_ENGINE_CANDIDATES: usize = 255;
 
@@ -55,6 +58,7 @@ pub struct SelfplayConfig {
     pub eval_processes: usize,
     pub admission_stagger_ms: u64,
     pub admission_smoothing: bool,
+    pub remote_measure: RemoteMeasureConfig,
 }
 
 #[derive(Clone, Debug)]
@@ -127,6 +131,7 @@ impl Default for SelfplayConfig {
             eval_processes: 1,
             admission_stagger_ms: 0,
             admission_smoothing: false,
+            remote_measure: RemoteMeasureConfig::default(),
         }
     }
 }
@@ -232,6 +237,7 @@ impl SelfplayConfig {
         if self.replay_retain == Some(0) {
             return Err("--replay-retain must be greater than zero".to_owned());
         }
+        self.remote_measure.validate()?;
         Ok(())
     }
 
@@ -373,6 +379,32 @@ pub fn run(config: SelfplayConfig) -> Result<SelfplaySummary, String> {
         ))
         .map_err(|error| error.to_string())?;
 
+    let job_capacity = config
+        .lanes
+        .checked_mul(config.workers_per_lane)
+        .ok_or_else(|| "remote measurement job capacity overflow".to_owned())?;
+    let mut remote_coordinator = RemoteCoordinator::start(&config.remote_measure, job_capacity)?;
+    if let Some(coordinator) = remote_coordinator.as_mut() {
+        coordinator.wait_for_agent(config.remote_measure.startup_timeout)?;
+    }
+    let remote_measurement = remote_coordinator.as_ref().map(|coordinator| {
+        let profile_hash = named_test_profile_hash(
+            config
+                .remote_measure
+                .profile
+                .as_deref()
+                .expect("validated remote measure profile"),
+        );
+        RemoteMeasurementRuntime::new(
+            coordinator.handle(),
+            Arc::new(
+                move |engine: &WhittleEngine, graph: WhittleGraphId, options| {
+                    whittle_measure_submission(engine, graph, options, profile_hash)
+                },
+            ),
+        )
+    });
+
     if let Some(socket) = config.serve_socket.clone() {
         let serve_store = Arc::clone(&store);
         let serve_max_batch = config.serve_max_batch;
@@ -385,9 +417,9 @@ pub fn run(config: SelfplayConfig) -> Result<SelfplaySummary, String> {
     }
 
     match config.evaluator {
-        EvaluatorMode::Stub => run_stub(config, store, engines, search, roots),
+        EvaluatorMode::Stub => run_stub(config, store, engines, search, roots, remote_measurement),
         EvaluatorMode::ProcessStub | EvaluatorMode::Torch => {
-            run_process(config, store, engines, search, roots)
+            run_process(config, store, engines, search, roots, remote_measurement)
         }
     }
 }
@@ -406,25 +438,28 @@ fn run_stub(
     engines: Vec<WhittleEngine>,
     search: GumbelMcts,
     roots: Vec<GeneratedRoots>,
+    measurement: Option<RemoteMeasurementRuntime<WhittleEngine>>,
 ) -> Result<SelfplaySummary, String> {
     let extractors = engines
         .iter()
         .map(|engine| feature_extractor(engine, &config))
         .collect::<Vec<_>>();
     let orchestrator = ThreadedGumbelOrchestrator::new(engines, search, threaded_config(&config)?);
-    let run = orchestrator
-        .run_featurized_with_replay(
-            roots,
-            FeaturizedRuntime {
-                extractors,
-                backends: vec![StubBackend],
-            },
-            ReplayRuntime {
-                store: &store,
-                backpressure: replay_backpressure(&config),
-            },
-        )
-        .map_err(|error| error.to_string())?;
+    let featurized = FeaturizedRuntime {
+        extractors,
+        backends: vec![StubBackend],
+    };
+    let replay = ReplayRuntime {
+        store: &store,
+        backpressure: replay_backpressure(&config),
+    };
+    let run = match measurement {
+        Some(measurement) => {
+            orchestrator.run_featurized_with_replay_remote(roots, featurized, replay, measurement)
+        }
+        None => orchestrator.run_featurized_with_replay(roots, featurized, replay),
+    }
+    .map_err(|error| error.to_string())?;
 
     summarize(&store, run, EvaluatorMode::Stub, Some(STUB_MODEL_VERSION))
 }
@@ -435,6 +470,7 @@ fn run_process(
     engines: Vec<WhittleEngine>,
     search: GumbelMcts,
     roots: Vec<GeneratedRoots>,
+    measurement: Option<RemoteMeasurementRuntime<WhittleEngine>>,
 ) -> Result<SelfplaySummary, String> {
     let extractors = engines
         .iter()
@@ -474,19 +510,21 @@ fn run_process(
     }
     let model_version = backends[0].model_version();
     let orchestrator = ThreadedGumbelOrchestrator::new(engines, search, threaded_config(&config)?);
-    let run = orchestrator
-        .run_featurized_with_replay(
-            roots,
-            FeaturizedRuntime {
-                extractors,
-                backends,
-            },
-            ReplayRuntime {
-                store: &store,
-                backpressure: replay_backpressure(&config),
-            },
-        )
-        .map_err(|error| error.to_string())?;
+    let featurized = FeaturizedRuntime {
+        extractors,
+        backends,
+    };
+    let replay = ReplayRuntime {
+        store: &store,
+        backpressure: replay_backpressure(&config),
+    };
+    let run = match measurement {
+        Some(measurement) => {
+            orchestrator.run_featurized_with_replay_remote(roots, featurized, replay, measurement)
+        }
+        None => orchestrator.run_featurized_with_replay(roots, featurized, replay),
+    }
+    .map_err(|error| error.to_string())?;
     for process in &mut processes {
         wait_for_process_exit(process)?;
     }
