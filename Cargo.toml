@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "crates/gz-engine",
+    "crates/gz-engine-compiler",
     "crates/gz-engine-whittle",
     "crates/gz-features",
     "crates/gz-eval-service",
