@@ -1,0 +1,23 @@
+extends = "pi05-base-full-b1-sm120-symmetric-20k-c4s48-b8-v4.toml"
+
+[trainer]
+min_startup_rows = 768
+
+[selfplay]
+max_steps = 24
+max_candidates = 256
+
+[engine]
+compiler_deployment = "configs/compiler/pi05-base-full-b1-sm120-performance-only-end-to-end-nvidia-v5.toml"
+
+[measurement]
+listen = "0.0.0.0:50067"
+receipt_dir = "/opt/dlami/nvme/graphzero-measure-receipts/pi05-base-full-b1-symmetric-20k-c4s48-b8-compact-v1-w16-compact-provider-v5-r2"
+
+[wandb]
+run_name = "compiler-pi05-base-full-b1-sm120-s42-m5-l24-w16-1m-end-to-end-nvidia-v5-c4s48-b8-reuse8-aux-v8-v32-score-nostop-eps2us-20k-2"
+
+[paths]
+run_dir = "/opt/dlami/nvme/graphzero-runs/pi05-base-full-b1-symmetric-20k-c4s48-b8-compact-v1-w16-compact-provider-v5-r2"
+replay_dir = "/opt/dlami/nvme/graphzero-replay/pi05-base-full-b1-symmetric-20k-c4s48-b8-compact-v1-w16-compact-provider-v5-r2"
+sample_socket = "/tmp/gz-pi05-base-full-b1-symmetric-20k-c4s48-b8-compact-v1-w16-compact-provider-v5-r2.sock"

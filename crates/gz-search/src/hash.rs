@@ -1,5 +1,5 @@
 use crate::GumbelValueMode;
-use gz_engine::{CandidateOptions, MeasureOptions, SearchConfigHash};
+use gz_engine::{CandidateHash, CandidateOptions, MeasureOptions, SearchConfigHash};
 
 pub fn greedy_search_config_hash(
     max_steps: usize,
@@ -51,6 +51,26 @@ pub fn reducing_uniform_distill_config_hash(
     update_bool(&mut hasher, export_position);
     update_candidate_options(&mut hasher, candidate_options);
     update_measure_options(&mut hasher, measure_options);
+    SearchConfigHash::from_bytes(*hasher.finalize().as_bytes())
+}
+
+pub fn trajectory_distill_config_hash(
+    max_steps: usize,
+    export_position: bool,
+    candidate_options: CandidateOptions,
+    measure_options: MeasureOptions,
+    trajectory: &[CandidateHash],
+) -> SearchConfigHash {
+    let mut hasher = blake3::Hasher::new();
+    update_chunk(&mut hasher, b"gz-distill-measured-trajectory-v1");
+    update_u64(&mut hasher, max_steps as u64);
+    update_bool(&mut hasher, export_position);
+    update_candidate_options(&mut hasher, candidate_options);
+    update_measure_options(&mut hasher, measure_options);
+    update_u64(&mut hasher, trajectory.len() as u64);
+    for candidate in trajectory {
+        update_chunk(&mut hasher, candidate.as_bytes());
+    }
     SearchConfigHash::from_bytes(*hasher.finalize().as_bytes())
 }
 

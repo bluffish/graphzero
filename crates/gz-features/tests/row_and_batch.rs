@@ -7,7 +7,7 @@ use gz_features::{
 use std::num::NonZeroUsize;
 
 const HAND_BUILT_BATCH_FINGERPRINT: &str =
-    "4bcc190edb765f12849989dacb0c12958de16bda3a58366b8c336b84757d9ae6";
+    "bb3fc664e44e785389bf102189627c15ef3338cc3e48f182aa6554392824aa41";
 
 fn schema() -> FeatureSchema {
     FeatureSchema::new(FeatureSchemaConfig {
@@ -98,6 +98,24 @@ fn row_validation_catches_stop_order() {
 }
 
 #[test]
+fn value_only_row_roundtrips_without_actions() {
+    let schema = schema();
+    let mut row = row();
+    row.actions.clear();
+    let mut encoded = Vec::new();
+
+    encode_feature_row(&row, &schema, &mut encoded).unwrap();
+
+    let decoded = decode_feature_row(&encoded).unwrap();
+    assert!(decoded.actions.is_empty());
+    let mut collator = FeatureCollator::new(schema, NonZeroUsize::new(1).unwrap());
+    let mut batch = Vec::new();
+    collator.collate_into(&[decoded], &mut batch).unwrap();
+    let view = FeatureBatchView::parse(&batch).unwrap();
+    assert_eq!(view.action_count, vec![0]);
+}
+
+#[test]
 fn collate_parse_roundtrips_sections_and_padding() {
     let schema = schema();
     let mut collator = FeatureCollator::new(schema.clone(), NonZeroUsize::new(2).unwrap());
@@ -134,7 +152,7 @@ fn collate_parse_roundtrips_sections_and_padding() {
     assert_eq!(view.action_count, vec![2, 0]);
     assert_eq!(view.action_kind[0..4], [4, 1, 0, 0]);
     assert_eq!(view.subject_count[0..4], [2, 0, 0, 0]);
-    assert_eq!(view.action_subjects[0..3], [1, 2, u32::from(u16::MAX)]);
+    assert_eq!(view.action_subjects[0..3], [1, 2, u32::MAX]);
     assert_eq!(view.position[0], [2.0, 3.0, 0.75, 0.125]);
     assert_eq!(view.opponent_reward, vec![0.5, 0.0]);
     assert_eq!(view.opponent_present, vec![1, 0]);
@@ -198,13 +216,77 @@ fn feature_row_codec_roundtrips_and_checks_header() {
 }
 
 #[test]
+fn row_and_batch_codecs_preserve_node_references_above_u16() {
+    let node_count = u32::from(u16::MAX) + 2;
+    let schema = FeatureSchema::new(FeatureSchemaConfig {
+        name: "wide-node-index-v1".to_string(),
+        node_vocab_size: 8,
+        node_attr_dim: 0,
+        edge_type_count: 1,
+        action_kind_vocab_size: 16,
+        max_nodes: node_count,
+        max_edges: 1,
+        max_actions: 2,
+        max_subjects: 1,
+        opponent_reward_scale: 256.0,
+        expander_degree: 0,
+        expander_seed: 0,
+    })
+    .unwrap();
+    let wide_index = node_count - 1;
+    let row = FeatureRow {
+        node_count,
+        node_tokens: vec![1; node_count as usize],
+        node_attrs: Vec::new(),
+        edges: vec![FeatureEdge {
+            src: wide_index,
+            dst: 0,
+            edge_type: 0,
+        }],
+        actions: vec![
+            ActionFeature {
+                kind_token: 3,
+                static_prior: 0.0,
+                subjects: vec![wide_index],
+            },
+            ActionFeature {
+                kind_token: 1,
+                static_prior: 0.0,
+                subjects: Vec::new(),
+            },
+        ],
+        position: PositionFeatures {
+            root_step: 0,
+            leaf_depth: 0,
+            budget_fraction: 1.0,
+            budget_step: 0.0,
+            opponent_reward: 0.0,
+            opponent_present: false,
+        },
+        opponent: None,
+    };
+
+    let mut encoded_row = Vec::new();
+    encode_feature_row(&row, &schema, &mut encoded_row).unwrap();
+    assert_eq!(decode_feature_row(&encoded_row).unwrap(), row);
+
+    let mut batch = Vec::new();
+    FeatureCollator::new(schema, NonZeroUsize::new(1).unwrap())
+        .collate_into(std::slice::from_ref(&row), &mut batch)
+        .unwrap();
+    let view = FeatureBatchView::parse(&batch).unwrap();
+    assert_eq!(view.edge_src[0], wide_index);
+    assert_eq!(view.action_subjects[0], wide_index);
+}
+
+#[test]
 fn feature_row_codec_has_stable_layout() {
     let schema = schema();
     let row = row();
     let mut bytes = Vec::new();
     encode_feature_row(&row, &schema, &mut bytes).unwrap();
 
-    // v2 layout: u16 node indexes and kind tokens, bf16 floats, u8
+    // v6 layout: u32 node indexes, u16 kind tokens, bf16 floats, and u8
     // subject counts. All float fixtures are dyadic, so their bf16 bits
     // are the top half of the f32 bits.
     let bf16 = |value: f32| (value.to_bits() >> 16) as u16;
@@ -222,7 +304,7 @@ fn feature_row_codec_has_stable_layout() {
         expected.extend_from_slice(&bf16(value).to_le_bytes());
     }
     expected.extend_from_slice(&2u32.to_le_bytes());
-    for (src, dst, edge_type) in [(0u16, 1u16, 0u8), (1, 2, 1)] {
+    for (src, dst, edge_type) in [(0u32, 1u32, 0u8), (1, 2, 1)] {
         expected.extend_from_slice(&src.to_le_bytes());
         expected.extend_from_slice(&dst.to_le_bytes());
         expected.push(edge_type);
@@ -231,8 +313,8 @@ fn feature_row_codec_has_stable_layout() {
     expected.extend_from_slice(&4u16.to_le_bytes());
     expected.extend_from_slice(&bf16(0.25).to_le_bytes());
     expected.push(2);
-    expected.extend_from_slice(&1u16.to_le_bytes());
-    expected.extend_from_slice(&2u16.to_le_bytes());
+    expected.extend_from_slice(&1u32.to_le_bytes());
+    expected.extend_from_slice(&2u32.to_le_bytes());
     expected.extend_from_slice(&1u16.to_le_bytes());
     expected.extend_from_slice(&bf16(0.0).to_le_bytes());
     expected.push(0);
@@ -253,8 +335,8 @@ fn feature_row_codec_has_stable_layout() {
         expected.extend_from_slice(&bf16(value).to_le_bytes());
     }
     expected.extend_from_slice(&1u32.to_le_bytes());
-    expected.extend_from_slice(&1u16.to_le_bytes());
-    expected.extend_from_slice(&0u16.to_le_bytes());
+    expected.extend_from_slice(&1u32.to_le_bytes());
+    expected.extend_from_slice(&0u32.to_le_bytes());
     expected.push(1);
     expected.extend_from_slice(&1u32.to_le_bytes());
     expected.extend_from_slice(&0u32.to_le_bytes());
@@ -298,7 +380,7 @@ fn training_targets_codec_writes_padded_sections() {
     assert_eq!(view.reward, vec![0.25, -0.5]);
     assert_eq!(
         fingerprint(&bytes),
-        "f5d19d99f1f60a430a2637bbdac958b1c0589d8297464aae66323452f9851287"
+        "441d11624ff39620885044b33b83993babc0fe07fbf75823dec198c66526d569"
     );
 }
 

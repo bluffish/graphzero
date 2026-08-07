@@ -15,8 +15,8 @@ use crate::keys::{
     decode_step_from_row_key, encode_u64, episode_key, row_index_key, row_key,
 };
 use crate::records::{
-    ReplayEpisodeId, ReplayEpisodeRecord, ReplayRow, StoredReplayRow, validate_episode,
-    validate_episode_engine_identity,
+    ReplayEpisodeId, ReplayEpisodeRecord, ReplayRow, ReplayRowKind, StoredReplayRow,
+    validate_episode, validate_episode_engine_identity,
 };
 use crate::sample::{ReplayRng, SampleConfig};
 use gz_engine::EngineIdentity;
@@ -28,7 +28,7 @@ use std::sync::{Arc, Mutex};
 
 mod contract;
 
-pub use contract::ReplayContract;
+pub use contract::{ReplayContract, SymmetricRewardTargetScale, SymmetricRewardTieEpsilon};
 
 pub struct ReplayStore {
     db: Arc<DB>,
@@ -733,6 +733,36 @@ impl ReplayStore {
         &self,
         config: SampleConfig,
     ) -> ReplayResult<Vec<(ReplayEpisodeId, ReplayRow)>> {
+        let out = self.sample_rows_inner(config)?;
+        self.record_consumed(config.batch.get() as u64)?;
+        Ok(out)
+    }
+
+    /// Samples replay rows without advancing learner-consumption accounting.
+    /// Intended for offline diagnostics, not trainer input.
+    pub fn inspect_rows(
+        &self,
+        config: SampleConfig,
+    ) -> ReplayResult<Vec<(ReplayEpisodeId, ReplayRow)>> {
+        self.sample_rows_inner(config)
+    }
+
+    /// Samples one terminal row from uniformly sampled retained episodes.
+    /// The row window determines the oldest eligible episode; sampling itself
+    /// is episode-uniform so long trajectories do not dominate value training.
+    pub fn sample_terminal_rows(
+        &self,
+        config: SampleConfig,
+    ) -> ReplayResult<Vec<(ReplayEpisodeId, ReplayRow)>> {
+        let out = self.sample_terminal_rows_inner(config)?;
+        self.record_consumed(config.batch.get() as u64)?;
+        Ok(out)
+    }
+
+    fn sample_rows_inner(
+        &self,
+        config: SampleConfig,
+    ) -> ReplayResult<Vec<(ReplayEpisodeId, ReplayRow)>> {
         // Lock-free against producers: appends commit all indexes and rows in
         // one WriteBatch before publishing the corresponding sequence count.
         // Load the floor before its producer count. Retention publishes the
@@ -758,7 +788,84 @@ impl ReplayStore {
             .map(|_| start + rng.next_bounded(window))
             .collect::<Vec<_>>();
         let out = self.read_row_sequences(&sequences)?;
-        self.record_consumed(config.batch.get() as u64)?;
+        Ok(out)
+    }
+
+    fn sample_terminal_rows_inner(
+        &self,
+        config: SampleConfig,
+    ) -> ReplayResult<Vec<(ReplayEpisodeId, ReplayRow)>> {
+        let floor = self.retained_floor.load(Ordering::Acquire);
+        let produced = self.produced_rows.load(Ordering::Acquire);
+        if produced <= floor || produced == 0 {
+            return Err(ReplayError::Empty);
+        }
+
+        let window = config.window_rows.get().min(produced - floor);
+        let first_row = produced - window;
+        let first_episode = self.episode_for_row_sequence(first_row)?;
+        let episode_end = self.next_episode_seq.load(Ordering::Acquire);
+        if first_episode >= episode_end {
+            return Err(ReplayError::Empty);
+        }
+
+        let mut rng = ReplayRng::new(config.seed);
+        let episode_count = episode_end - first_episode;
+        let sequences = (0..config.batch.get())
+            .map(|_| first_episode + rng.next_bounded(episode_count))
+            .collect::<Vec<_>>();
+        self.read_terminal_episode_sequences(&sequences)
+    }
+
+    fn episode_for_row_sequence(&self, sequence: u64) -> ReplayResult<u64> {
+        let row_index = self.cf(CF_ROW_INDEX)?;
+        let key = self
+            .db
+            .get_cf(&row_index, row_index_key(sequence))?
+            .ok_or_else(|| ReplayError::storage("missing row index entry"))?;
+        decode_episode_from_row_key(&key).ok_or_else(|| ReplayError::storage("corrupt row key"))
+    }
+
+    fn read_terminal_episode_sequences(
+        &self,
+        sequences: &[u64],
+    ) -> ReplayResult<Vec<(ReplayEpisodeId, ReplayRow)>> {
+        let episodes = self.cf(CF_EPISODES)?;
+        let rows = self.cf(CF_ROWS)?;
+        let episode_keys = sequences
+            .iter()
+            .copied()
+            .map(episode_key)
+            .collect::<Vec<_>>();
+        let mut row_keys = Vec::with_capacity(sequences.len());
+        for (sequence, result) in sequences.iter().copied().zip(self.db.batched_multi_get_cf(
+            &episodes,
+            &episode_keys,
+            false,
+        )) {
+            let bytes = result?.ok_or_else(|| ReplayError::storage("missing episode record"))?;
+            let record = postcard::from_bytes::<ReplayEpisodeRecord>(&bytes)?;
+            if record.row_count as usize != record.steps.len() + 1 {
+                return Err(ReplayError::storage("episode has no terminal row"));
+            }
+            let terminal_step = u32::try_from(record.steps.len())
+                .map_err(|_| ReplayError::storage("terminal step overflow"))?;
+            row_keys.push(row_key(sequence, terminal_step));
+        }
+
+        let mut out = Vec::with_capacity(sequences.len());
+        for (sequence, result) in sequences.iter().copied().zip(self.db.batched_multi_get_cf(
+            &rows,
+            row_keys.iter(),
+            false,
+        )) {
+            let bytes = result?.ok_or_else(|| ReplayError::storage("missing terminal row"))?;
+            let row = postcard::from_bytes::<StoredReplayRow>(&bytes)?.into_row();
+            if row.kind != ReplayRowKind::Terminal {
+                return Err(ReplayError::storage("terminal row kind mismatch"));
+            }
+            out.push((ReplayEpisodeId::new(sequence), row));
+        }
         Ok(out)
     }
 

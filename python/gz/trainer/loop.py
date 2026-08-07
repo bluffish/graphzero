@@ -32,6 +32,7 @@ class LoopConfig:
     value_v8_weight: float = 0.0
     value_v32_weight: float = 0.0
     terminal_score_weight: float = 0.0
+    terminal_score_target: str = "node-count"
     soft_policy_weight: float = 0.0
     soft_policy_temperature: float = 4.0
     soft_policy_trunk_grad_scale: float = 1.0

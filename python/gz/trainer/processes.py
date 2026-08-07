@@ -16,12 +16,17 @@ def init_replay(config: RunConfig) -> None:
         [
             config.paths.graphzero_bin,
             "replay-init",
+            *_engine_args(config),
             "--replay-dir",
             str(config.paths.replay_dir),
             "--max-candidates",
             str(config.selfplay.max_candidates),
             "--mask-stop",
             "true" if config.selfplay.mask_stop else "false",
+            "--symmetric-reward-tie-epsilon",
+            str(config.selfplay.symmetric_reward_tie_epsilon),
+            "--symmetric-reward-target-scale",
+            str(config.selfplay.symmetric_reward_target_scale),
         ],
         check=True,
     )
@@ -54,19 +59,20 @@ def spawn_torch_selfplay(config: RunConfig) -> subprocess.Popen[bytes]:
             config.measurement.server_key,
             "--measure-client-ca",
             config.measurement.client_ca,
-            "--measure-profile",
-            config.measurement.profile,
             "--measure-receipt-dir",
             config.measurement.receipt_dir,
             "--measure-startup-timeout-ms",
             str(config.measurement.startup_timeout_ms),
         ]
+        if config.measurement.profile:
+            measurement_args.extend(("--measure-profile", config.measurement.profile))
         for agent in config.measurement.agents:
             measurement_args.extend(("--measure-agent", agent))
     return subprocess.Popen(
         [
             config.paths.graphzero_bin,
             "selfplay",
+            *_engine_args(config),
             "--replay-dir",
             str(config.paths.replay_dir),
             "--episodes",
@@ -85,6 +91,10 @@ def spawn_torch_selfplay(config: RunConfig) -> subprocess.Popen[bytes]:
             "true" if config.selfplay.tree_reuse else "false",
             "--mask-stop",
             "true" if config.selfplay.mask_stop else "false",
+            "--symmetric-reward-tie-epsilon",
+            str(config.selfplay.symmetric_reward_tie_epsilon),
+            "--symmetric-reward-target-scale",
+            str(config.selfplay.symmetric_reward_target_scale),
             "--eval-processes",
             str(config.selfplay.eval_processes),
             "--admission-stagger-ms",
@@ -103,6 +113,8 @@ def spawn_torch_selfplay(config: RunConfig) -> subprocess.Popen[bytes]:
             config.selfplay.eval_device,
             "--eval-poll-interval",
             str(config.selfplay.eval_poll_interval),
+            "--eval-max-resident-model-generations",
+            str(config.selfplay.eval_max_resident_model_generations),
             "--seed",
             str(config.selfplay.seed),
             "--max-steps",
@@ -141,6 +153,31 @@ def spawn_torch_selfplay(config: RunConfig) -> subprocess.Popen[bytes]:
         start_new_session=True,
         stderr=subprocess.PIPE,
     )
+
+
+def _engine_args(config: RunConfig) -> list[str]:
+    args = [
+        "--engine",
+        config.engine.kind,
+        "--measure-samples",
+        str(config.engine.measure_samples),
+    ]
+    if config.engine.kind == "compiler":
+        args.extend(
+            (
+                "--compiler-deployment",
+                config.engine.compiler_deployment,
+                "--compiler-max-nodes",
+                str(config.engine.compiler_max_nodes),
+                "--compiler-max-edges",
+                str(config.engine.compiler_max_edges),
+                "--compiler-max-subjects",
+                str(config.engine.compiler_max_subjects),
+                "--compiler-feature-layout",
+                config.engine.compiler_feature_layout,
+            )
+        )
+    return args
 
 
 @dataclass(slots=True)

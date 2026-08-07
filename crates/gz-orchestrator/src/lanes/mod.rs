@@ -12,7 +12,9 @@ use gz_features::{
     FeatureCollator, FeatureExtractor, FeatureRow, FeatureSchema, FeatureSchemaHash,
 };
 use gz_measurer::{MeasureLedgerSnapshot, MeasuredSymmetricGame, MeasurerAdmission};
-use gz_replay::{ReplayContract, ReplayError, ReplayStore};
+use gz_replay::{
+    ReplayContract, ReplayError, ReplayStore, SymmetricRewardTargetScale, SymmetricRewardTieEpsilon,
+};
 use gz_search::{GumbelMcts, GumbelValueMode, WorkToken};
 use std::num::NonZeroU64;
 use std::num::NonZeroUsize;
@@ -37,6 +39,7 @@ pub struct ThreadedOrchestratorConfig {
     pub flush_after: Duration,
     pub admission_stagger: Duration,
     pub admission_smoothing: Option<AdmissionSmoothingConfig>,
+    pub max_resident_model_generations: usize,
 }
 
 pub struct ThreadedGumbelOrchestrator<E> {
@@ -48,6 +51,8 @@ pub struct ThreadedGumbelOrchestrator<E> {
 pub struct ReplayRuntime<'a> {
     pub store: &'a ReplayStore,
     pub backpressure: Option<ReplayBackpressure>,
+    pub reward_tie_epsilon: SymmetricRewardTieEpsilon,
+    pub reward_target_scale: SymmetricRewardTargetScale,
 }
 
 pub struct FeaturizedRuntime<X, B> {
@@ -105,9 +110,16 @@ pub(crate) struct MeasureReply<G> {
     pub result: EngineResult<MeasureResult<G>>,
 }
 
+pub(crate) struct MeasurePairReply<G> {
+    pub slot: usize,
+    pub token: WorkToken,
+    pub result: EngineResult<[MeasureResult<G>; 2]>,
+}
+
 pub(crate) enum LaneReply<G> {
     Eval(EvalReply),
     Measure(MeasureReply<G>),
+    MeasurePair(MeasurePairReply<G>),
 }
 
 struct FeaturizedBatcherContext {
@@ -226,11 +238,15 @@ where
         let feature_schema = first_schema::<E, X>(&featurized.extractors, schema_hash)?;
         replay
             .store
-            .ensure_contract(&ReplayContract::featurized(
-                data_mode,
-                feature_schema.config().clone(),
-                engine_identity,
-            ))
+            .ensure_contract(
+                &ReplayContract::featurized(
+                    data_mode,
+                    feature_schema.config().clone(),
+                    engine_identity,
+                )
+                .with_symmetric_reward_tie_epsilon(replay.reward_tie_epsilon)
+                .with_symmetric_reward_target_scale(replay.reward_target_scale),
+            )
             .map_err(map_replay_error)?;
 
         let workers_per_lane = self.config.workers_per_lane.get();
@@ -294,18 +310,26 @@ where
         let backends = featurized.backends;
         let model_registries = backends
             .iter()
-            .map(|backend| ModelLeaseRegistry::new(backend.model_generation()).map(Arc::new))
+            .map(|backend| {
+                ModelLeaseRegistry::new(
+                    backend.model_generation(),
+                    config.max_resident_model_generations,
+                )
+                .map(Arc::new)
+            })
             .collect::<EngineResult<Vec<_>>>()?;
         let extractors = featurized.extractors;
         let engines = self.engines;
         let store = replay.store;
         let backpressure = replay.backpressure;
+        let reward_tie_epsilon = replay.reward_tie_epsilon;
+        let reward_target_scale = replay.reward_target_scale;
         validate_collator_capacity(
             &FeatureCollator::new(feature_schema.clone(), config.max_batch),
             config,
         )?;
-        let (batch_results, sink_result, lane_results, gateway_result) =
-            std::thread::scope(|scope| {
+        let (batch_results, sink_result, lane_results, gateway_result) = std::thread::scope(
+            |scope| {
                 let gateway_handle = match (measure_coordinator, measure_rx) {
                     (Some(coordinator), Some(measure_rx)) => {
                         let reply_txs = reply_txs.clone();
@@ -313,6 +337,11 @@ where
                         Some(scope.spawn(move || {
                             let mut exit = PipelineExit::new(pipeline_closed);
                             let result = run_measure_gateway(coordinator, measure_rx, reply_txs);
+                            if let Err(error) = &result {
+                                eprintln!(
+                                    "event=pipeline_error component=measure_gateway error={error}"
+                                );
+                            }
                             if result.is_ok() {
                                 exit.disarm();
                             }
@@ -323,10 +352,11 @@ where
                     _ => unreachable!("remote measurement runtime is complete"),
                 };
                 let mut batch_handles = Vec::with_capacity(backend_count);
-                for ((backend, intake_rx), model_registry) in backends
+                for (backend_index, ((backend, intake_rx), model_registry)) in backends
                     .into_iter()
                     .zip(intake_rxs)
                     .zip(model_registries.iter().cloned())
+                    .enumerate()
                 {
                     let batch_capacity = backend.batch_capacity().unwrap_or(config.max_batch);
                     let collator = FeatureCollator::new(feature_schema.clone(), batch_capacity);
@@ -346,6 +376,11 @@ where
                                 eval_pressure: Some(eval_pressure),
                             },
                         );
+                        if let Err(error) = &result {
+                            eprintln!(
+                                "event=pipeline_error component=eval_batcher backend={backend_index} error={error}"
+                            );
+                        }
                         if result.is_ok() {
                             exit.disarm();
                         }
@@ -353,7 +388,14 @@ where
                     }));
                 }
                 drop(reply_txs);
-                let sink_handle = scope.spawn(move || run_replay_sink(store, replay_rx));
+                let sink_handle = scope.spawn(move || {
+                    let result =
+                        run_replay_sink(store, replay_rx, reward_tie_epsilon, reward_target_scale);
+                    if let Err(error) = &result {
+                        eprintln!("event=pipeline_error component=replay_sink error={error}");
+                    }
+                    result
+                });
                 let mut lane_handles = Vec::with_capacity(lanes);
 
                 for (lane, ((((engine, roots), extractor), reply_rx), model_registry)) in
@@ -403,6 +445,11 @@ where
                                 model_registry,
                             ),
                         );
+                        if let Err(error) = &result {
+                            eprintln!(
+                                "event=pipeline_error component=lane lane={lane} error={error}"
+                            );
+                        }
                         if result.is_ok() {
                             exit.disarm();
                         }
@@ -441,7 +488,8 @@ where
                 });
 
                 (batch_results, sink_result, lane_results, gateway_result)
-            });
+            },
+        );
 
         let mut batch_sizes = Vec::new();
         for result in batch_results {

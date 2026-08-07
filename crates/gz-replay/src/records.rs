@@ -87,13 +87,14 @@ enum StoredReplayReferenceKind {
 
 #[derive(Clone, Debug, PartialEq, serde::Deserialize, serde::Serialize)]
 pub struct ReplayRow {
+    pub kind: ReplayRowKind,
     pub step_index: u32,
     pub root: ReplayGraphContext,
     pub state: ReplayGraphContext,
     pub action_history: Vec<PortableSearchActionRef>,
     pub legal_actions: Vec<PortableSearchActionRef>,
     pub policy_target: Vec<f32>,
-    pub selected_action: PortableSearchActionRef,
+    pub selected_action: Option<PortableSearchActionRef>,
     pub value_target: Option<f32>,
     pub horizon_value_targets: Option<[f32; 2]>,
     pub reward_target: Option<f32>,
@@ -101,6 +102,12 @@ pub struct ReplayRow {
     pub model_version: Option<ModelVersion>,
     pub search_config_hash: SearchConfigHash,
     pub feature_row: Option<Vec<u8>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Deserialize, serde::Serialize)]
+pub enum ReplayRowKind {
+    Decision,
+    Terminal,
 }
 
 /// Storage twin of [`ReplayRow`]. Every legal action of a row references
@@ -113,13 +120,14 @@ pub struct ReplayRow {
 /// the context invariant is validated at append.
 #[derive(Debug, serde::Deserialize, serde::Serialize)]
 pub(crate) struct StoredReplayRow {
+    kind: ReplayRowKind,
     step_index: u32,
     root: ReplayGraphContext,
     state: ReplayGraphContext,
     action_history: Vec<PortableSearchActionRef>,
     legal_actions: Vec<StoredLegalAction>,
     policy_target_bf16: Vec<u16>,
-    selected_action: PortableSearchActionRef,
+    selected_action: Option<PortableSearchActionRef>,
     value_target: Option<f32>,
     horizon_value_targets: Option<[f32; 2]>,
     reward_target: Option<f32>,
@@ -156,6 +164,7 @@ impl StoredReplayRow {
         }
 
         Ok(Self {
+            kind: row.kind,
             step_index: row.step_index,
             root: row.root,
             state: row.state,
@@ -192,6 +201,7 @@ impl StoredReplayRow {
             .collect();
 
         ReplayRow {
+            kind: self.kind,
             step_index: self.step_index,
             root: self.root,
             state,
@@ -224,7 +234,15 @@ pub(crate) fn validate_episode(
     validate_admission(record)?;
     validate_outcome(record, data_mode)?;
 
-    if rows.len() != record.row_count as usize || rows.len() != record.steps.len() {
+    if rows.len() != record.row_count as usize {
+        return Err(ReplayError::InvalidRecord);
+    }
+
+    let terminal_rows = rows
+        .iter()
+        .filter(|row| row.kind == ReplayRowKind::Terminal)
+        .count();
+    if rows.len() != record.steps.len() + terminal_rows || terminal_rows > 1 {
         return Err(ReplayError::InvalidRecord);
     }
 
@@ -251,8 +269,18 @@ pub(crate) fn validate_episode(
             validate_feature_row_header(bytes, &hash).map_err(|_| ReplayError::InvalidRecord)?;
         }
 
-        validate_row(record, row, &expected_history, data_mode)?;
-        expected_history.push(record.steps[index].action);
+        match row.kind {
+            ReplayRowKind::Decision => {
+                validate_decision_row(record, row, &expected_history, data_mode)?;
+                expected_history.push(record.steps[index].action);
+            }
+            ReplayRowKind::Terminal => {
+                if index != record.steps.len() || terminal_rows != 1 {
+                    return Err(ReplayError::InvalidRecord);
+                }
+                validate_terminal_row(record, row, &expected_history, data_mode)?;
+            }
+        }
     }
 
     Ok(())
@@ -302,7 +330,10 @@ fn validate_outcome(record: &ReplayEpisodeRecord, data_mode: ReplayDataMode) -> 
     }
     let valid = if data_mode.is_symmetric_selfplay() {
         (!record.outcome.stopped || data_mode.symmetric_stop_enabled())
-            && matches!(record.outcome.value_target, Some(-1.0 | 0.0 | 1.0))
+            && record
+                .outcome
+                .value_target
+                .is_some_and(|value| value.is_finite() && (-1.0..=1.0).contains(&value))
             && (!data_mode.symmetric_stop_enabled()
                 || record.outcome.stopped
                     == record.steps.last().is_some_and(|step| {
@@ -318,7 +349,7 @@ fn validate_outcome(record: &ReplayEpisodeRecord, data_mode: ReplayDataMode) -> 
     Ok(())
 }
 
-fn validate_row(
+fn validate_decision_row(
     record: &ReplayEpisodeRecord,
     row: &ReplayRow,
     expected_history: &[PortableSearchActionRef],
@@ -328,7 +359,7 @@ fn validate_row(
 
     if row.root != record.root
         || row.state != step.before
-        || row.selected_action != step.action
+        || row.selected_action != Some(step.action)
         || row.action_history != expected_history
         || row.final_measure != record.final_measure
         || row.search_config_hash != record.search_config_hash
@@ -359,7 +390,10 @@ fn validate_row(
         return Err(ReplayError::InvalidRecord);
     }
 
-    if !row.legal_actions.contains(&row.selected_action) {
+    if !row
+        .selected_action
+        .is_some_and(|selected| row.legal_actions.contains(&selected))
+    {
         return Err(ReplayError::InvalidRecord);
     }
 
@@ -373,6 +407,30 @@ fn validate_row(
     validate_horizon_value_targets(row.horizon_value_targets, data_mode)?;
 
     Ok(())
+}
+
+fn validate_terminal_row(
+    record: &ReplayEpisodeRecord,
+    row: &ReplayRow,
+    expected_history: &[PortableSearchActionRef],
+    data_mode: ReplayDataMode,
+) -> ReplayResult<()> {
+    if !data_mode.is_symmetric_selfplay()
+        || row.root != record.root
+        || row.state != record.final_graph
+        || row.action_history != expected_history
+        || !row.legal_actions.is_empty()
+        || !row.policy_target.is_empty()
+        || row.selected_action.is_some()
+        || row.final_measure != record.final_measure
+        || row.search_config_hash != record.search_config_hash
+        || row.value_target != record.outcome.value_target
+        || row.reward_target != Some(record.outcome.reward)
+    {
+        return Err(ReplayError::InvalidRecord);
+    }
+    validate_value_target(row.value_target, data_mode)?;
+    validate_horizon_value_targets(row.horizon_value_targets, data_mode)
 }
 
 fn validate_horizon_value_targets(
@@ -394,7 +452,7 @@ fn validate_horizon_value_targets(
 
 fn validate_value_target(value: Option<f32>, data_mode: ReplayDataMode) -> ReplayResult<()> {
     match (value, data_mode.is_symmetric_selfplay()) {
-        (Some(value), true) if value == -1.0 || value == 0.0 || value == 1.0 => Ok(()),
+        (Some(value), true) if value.is_finite() && (-1.0..=1.0).contains(&value) => Ok(()),
         (Some(value), false) if value == -1.0 || value == 1.0 => Ok(()),
         (Some(_), _) => Err(ReplayError::InvalidRecord),
         (None, _) => Ok(()),

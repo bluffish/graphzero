@@ -26,9 +26,9 @@ pub use ids::{
 };
 pub use protocol::{
     ArtifactDescriptor, CommittedMeasurement, EncodedMeasureConfig, MEASUREMENT_PROTOCOL_VERSION,
-    MeasureSubmission, PROTOCOL_MAJOR, PROTOCOL_MINOR, artifact_descriptor, artifact_format,
-    device_profile_hash, engine_identity_from_wire, engine_identity_to_wire, job_id,
-    measurement_key, wire,
+    MeasureSubmission, MeasureSubmissionKind, PROTOCOL_MAJOR, PROTOCOL_MINOR, artifact_descriptor,
+    artifact_format, device_profile_hash, engine_identity_from_wire, engine_identity_to_wire,
+    job_id, measurement_key, wire,
 };
 pub use receipt::ReceiptLedgerConfig;
 pub use transport::{AgentTlsConfig, CoordinatorServer, CoordinatorTlsConfig, InsecureTransport};

@@ -1,5 +1,5 @@
 use gz_engine::{MeasureSummary, ModelVersion, PortableSearchActionRef, SearchConfigHash};
-use gz_replay::{ReplayEpisodeRecord, ReplayOutcome, ReplayRow};
+use gz_replay::{ReplayEpisodeRecord, ReplayOutcome, ReplayRow, ReplayRowKind};
 
 #[derive(Clone, Debug, PartialEq)]
 pub struct CompletedEpisodeArtifact {
@@ -10,6 +10,7 @@ pub struct CompletedEpisodeArtifact {
     pub search_config_hash: SearchConfigHash,
     pub steps: Vec<CompletedEpisodeStep>,
     pub feature_rows: Option<Vec<Vec<u8>>>,
+    pub terminal_feature_row: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -51,13 +52,14 @@ pub fn project_episode(
             .map_err(|_| MeasurerError::StepCountOverflow)?;
         search_steps.push(step_ref);
         rows.push(ReplayRow {
+            kind: ReplayRowKind::Decision,
             step_index,
             root: artifact.root,
             state: step.before,
             action_history: action_history.clone(),
             legal_actions: step.legal_actions.clone(),
             policy_target: step.policy_target.clone(),
-            selected_action: step.selected_action,
+            selected_action: Some(step.selected_action),
             value_target: None,
             horizon_value_targets: None,
             reward_target: Some(reward),
@@ -70,6 +72,28 @@ pub fn project_episode(
                 .map(|feature_rows| feature_rows[index].clone()),
         });
         action_history.push(step.selected_action);
+    }
+
+    if let Some(feature_row) = &artifact.terminal_feature_row {
+        let step_index =
+            u32::try_from(artifact.steps.len()).map_err(|_| MeasurerError::StepCountOverflow)?;
+        rows.push(ReplayRow {
+            kind: ReplayRowKind::Terminal,
+            step_index,
+            root: artifact.root,
+            state: artifact.final_graph,
+            action_history,
+            legal_actions: Vec::new(),
+            policy_target: Vec::new(),
+            selected_action: None,
+            value_target: None,
+            horizon_value_targets: None,
+            reward_target: Some(reward),
+            final_measure: artifact.final_measure.clone(),
+            model_version: artifact.steps.last().and_then(|step| step.model_version),
+            search_config_hash: artifact.search_config_hash,
+            feature_row: Some(feature_row.clone()),
+        });
     }
 
     let record = ReplayEpisodeRecord {

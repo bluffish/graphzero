@@ -9,6 +9,7 @@ path = "src/main.rs"
 
 [dependencies]
 gz-engine = { path = "../gz-engine" }
+gz-engine-compiler = { path = "../gz-engine-compiler" }
 gz-engine-whittle = { path = "../gz-engine-whittle" }
 gz-eval = { path = "../gz-eval" }
 gz-eval-service = { path = "../gz-eval-service" }

@@ -49,6 +49,7 @@ pub enum SearchWork<G, C> {
     Expand(ExpandWork<G>),
     Apply(ApplyWork<G, C>),
     Measure(MeasureWork<G>),
+    MeasurePair(MeasurePairWork<G>),
     Eval(EvalWork<G, C>),
 }
 
@@ -59,6 +60,7 @@ impl<G, C> SearchWork<G, C> {
             Self::Expand(work) => work.token,
             Self::Apply(work) => work.token,
             Self::Measure(work) => work.token,
+            Self::MeasurePair(work) => work.token,
             Self::Eval(work) => work.token,
         }
     }
@@ -85,6 +87,14 @@ pub struct MeasureWork<G> {
     pub options: MeasureOptions,
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct MeasurePairWork<G> {
+    pub token: WorkToken,
+    /// Logical index 0 is player one and logical index 1 is player two.
+    pub graphs: [G; 2],
+    pub options: MeasureOptions,
+}
+
 #[derive(Clone, Debug)]
 pub struct EvalWork<G, C> {
     pub token: WorkToken,
@@ -107,6 +117,7 @@ pub enum SearchWorkResult<G, C> {
     Expand(ExpandResult<C>),
     Apply(ApplyResult<G, C>),
     Measure(MeasureResult<G>),
+    MeasurePair([MeasureResult<G>; 2]),
     Eval(EvalOutput),
 }
 

@@ -19,7 +19,7 @@ use tonic::{Request, Response, Status, Streaming};
 
 const MAX_PROFILE_STRING_BYTES: usize = 128;
 const MAX_AGENT_BUILD_BYTES: usize = 128;
-type RecoveryReconciliation = (Vec<wire::RecoveryDisposition>, Option<(JobId, LeaseId)>);
+type RecoveryReconciliation = (Vec<wire::RecoveryDisposition>, HashMap<JobId, LeaseId>);
 
 #[derive(Clone, Debug)]
 pub enum Enrollment {
@@ -156,14 +156,15 @@ struct AgentSession {
     capabilities: Vec<wire::EngineCapability>,
     command_tx: mpsc::Sender<Result<wire::CoordinatorCommand, Status>>,
     peer_fingerprint: Option<CertificateFingerprint>,
-    ready: bool,
+    slot_capacity: u32,
+    free_slots: u32,
     draining: bool,
-    active: Option<(JobId, LeaseId)>,
+    active: HashMap<JobId, LeaseId>,
 }
 
 struct Job {
     submission: MeasureSubmission,
-    descriptor: ArtifactDescriptor,
+    descriptors: Vec<ArtifactDescriptor>,
     measurement_key: MeasurementKey,
     request_nonce: RequestNonce,
     reply: Option<oneshot::Sender<ServiceResult<CommittedMeasurement>>>,
@@ -286,7 +287,7 @@ impl CoordinatorHandle {
         let mut state = lock_state(&self.inner);
         for agent in state.agents.values_mut() {
             agent.draining = true;
-            agent.ready = false;
+            agent.free_slots = 0;
             let _ = agent.command_tx.try_send(Ok(wire::CoordinatorCommand {
                 command: Some(coordinator_command::Command::Drain(wire::DrainAgent {
                     cancel_active: false,
@@ -304,8 +305,12 @@ impl CoordinatorHandle {
         oneshot::Receiver<ServiceResult<CommittedMeasurement>>,
     )> {
         validate_submission(&self.inner.config, &submission)?;
-        let descriptor = artifact_descriptor(&submission.artifact)?;
-        let measurement_key = measurement_key(&submission, descriptor);
+        let descriptors = submission
+            .subjects
+            .iter()
+            .map(artifact_descriptor)
+            .collect::<ServiceResult<Vec<_>>>()?;
+        let measurement_key = measurement_key(&submission, &descriptors);
         let job_id = job_id(measurement_key, request_nonce);
         let (reply, receiver) = oneshot::channel();
         let mut state = lock_state(&self.inner);
@@ -321,17 +326,17 @@ impl CoordinatorHandle {
             return Err(ServiceError::capacity("coordinator receipt ledger is full"));
         }
 
-        retain_artifact(
+        retain_artifacts(
             &self.inner.config,
             &mut state,
-            descriptor.digest,
-            &submission.artifact.bytes,
+            &descriptors,
+            &submission.subjects,
         )?;
         state.jobs.insert(
             job_id,
             Job {
                 submission,
-                descriptor,
+                descriptors,
                 measurement_key,
                 request_nonce,
                 reply: Some(reply),
@@ -349,10 +354,17 @@ fn validate_submission(
     config: &CoordinatorConfig,
     submission: &MeasureSubmission,
 ) -> ServiceResult<()> {
-    if submission.artifact.bytes.len() > config.max_artifact_bytes {
-        return Err(ServiceError::capacity(
-            "artifact exceeds configured maximum",
+    if submission.subjects.len() != submission.kind.subject_count() {
+        return Err(ServiceError::configuration(
+            "measurement kind has the wrong subject count",
         ));
+    }
+    for artifact in &submission.subjects {
+        if artifact.bytes.len() > config.max_artifact_bytes {
+            return Err(ServiceError::capacity(
+                "artifact exceeds configured maximum",
+            ));
+        }
     }
     if submission.measure_config.encoding == 0 {
         return Err(ServiceError::configuration(
@@ -367,43 +379,82 @@ fn validate_submission(
     Ok(())
 }
 
-fn retain_artifact(
+fn retain_artifacts(
     config: &CoordinatorConfig,
     state: &mut CoordinatorState,
-    digest: ArtifactDigest,
-    bytes: &[u8],
+    descriptors: &[ArtifactDescriptor],
+    artifacts: &[gz_engine::GraphArtifact],
 ) -> ServiceResult<()> {
-    if let Some(record) = state.artifacts.get_mut(&digest) {
-        if record.bytes.as_ref() != bytes {
-            return Err(ServiceError::protocol(
-                "artifact digest collision with different bytes",
-            ));
+    let mut requested = HashMap::<ArtifactDigest, (&[u8], usize)>::new();
+    for (descriptor, artifact) in descriptors.iter().zip(artifacts) {
+        match requested.get_mut(&descriptor.digest) {
+            Some((bytes, references)) => {
+                if *bytes != artifact.bytes.as_slice() {
+                    return Err(ServiceError::protocol(
+                        "artifact digest collision with different bytes",
+                    ));
+                }
+                *references = references
+                    .checked_add(1)
+                    .ok_or_else(|| ServiceError::capacity("artifact reference count overflow"))?;
+            }
+            None => {
+                requested.insert(descriptor.digest, (&artifact.bytes, 1));
+            }
         }
-        record.references = record
-            .references
-            .checked_add(1)
-            .ok_or_else(|| ServiceError::capacity("artifact reference count overflow"))?;
-        return Ok(());
     }
 
-    if state.artifacts.len() >= config.artifact_item_capacity {
+    let mut new_items = 0_usize;
+    let mut new_bytes = 0_usize;
+    for (digest, (bytes, references)) in &requested {
+        if let Some(record) = state.artifacts.get(digest) {
+            if record.bytes.as_ref() != *bytes {
+                return Err(ServiceError::protocol(
+                    "artifact digest collision with different bytes",
+                ));
+            }
+            record
+                .references
+                .checked_add(*references)
+                .ok_or_else(|| ServiceError::capacity("artifact reference count overflow"))?;
+        } else {
+            new_items = new_items
+                .checked_add(1)
+                .ok_or_else(|| ServiceError::capacity("artifact item count overflow"))?;
+            new_bytes = new_bytes
+                .checked_add(bytes.len())
+                .ok_or_else(|| ServiceError::capacity("artifact byte count overflow"))?;
+        }
+    }
+    if state
+        .artifacts
+        .len()
+        .checked_add(new_items)
+        .is_none_or(|items| items > config.artifact_item_capacity)
+    {
         return Err(ServiceError::capacity("artifact item capacity is full"));
     }
     let new_total = state
         .artifact_bytes
-        .checked_add(bytes.len())
+        .checked_add(new_bytes)
         .ok_or_else(|| ServiceError::capacity("artifact byte count overflow"))?;
     if new_total > config.artifact_byte_capacity {
         return Err(ServiceError::capacity("artifact byte capacity is full"));
     }
     state.artifact_bytes = new_total;
-    state.artifacts.insert(
-        digest,
-        ArtifactRecord {
-            bytes: Arc::from(bytes),
-            references: 1,
-        },
-    );
+    for (digest, (bytes, references)) in requested {
+        if let Some(record) = state.artifacts.get_mut(&digest) {
+            record.references += references;
+        } else {
+            state.artifacts.insert(
+                digest,
+                ArtifactRecord {
+                    bytes: Arc::from(bytes),
+                    references,
+                },
+            );
+        }
+    }
     Ok(())
 }
 
@@ -427,14 +478,10 @@ fn snapshot(state: &CoordinatorState) -> CoordinatorSnapshot {
         ready_agents: state
             .agents
             .values()
-            .filter(|agent| agent.ready && !agent.draining)
+            .filter(|agent| agent.free_slots > 0 && !agent.draining)
             .count(),
         queued_jobs: state.queue.len(),
-        active_leases: state
-            .agents
-            .values()
-            .filter(|agent| agent.active.is_some())
-            .count(),
+        active_leases: state.agents.values().map(|agent| agent.active.len()).sum(),
         running_leases: state
             .jobs
             .values()
@@ -482,26 +529,26 @@ fn schedule(config: &CoordinatorConfig, state: &mut CoordinatorState) {
         job.state = JobState::Offered(active);
         job.recovery = None;
         let agent = state.agents.get_mut(&device_id).unwrap();
-        agent.ready = false;
-        agent.active = Some((job_id, lease_id));
+        agent.free_slots -= 1;
+        agent.active.insert(job_id, lease_id);
 
         if command_tx.try_send(Ok(command)).is_err() {
-            requeue_active(state, job_id, active, false);
-            state.agents.remove(&device_id);
+            remove_agent_session(state, device_id);
         }
     }
 }
 
 fn agent_matches(agent: &AgentSession, job: &Job) -> bool {
-    agent.ready
+    agent.free_slots > 0
         && !agent.draining
-        && agent.active.is_none()
         && agent.profile_hash == job.submission.target_device_profile_hash
         && agent.capabilities.iter().any(|capability| {
             capability.engine.as_ref() == Some(&engine_identity_to_wire(job.submission.engine))
-                && capability.artifact_formats.iter().any(|format| {
-                    format.format_kind == job.descriptor.format_kind as i32
-                        && format.adapter_format_id == job.descriptor.adapter_format_id
+                && job.descriptors.iter().all(|descriptor| {
+                    capability.artifact_formats.iter().any(|format| {
+                        format.format_kind == descriptor.format_kind as i32
+                            && format.adapter_format_id == descriptor.adapter_format_id
+                    })
                 })
                 && capability
                     .measure_config_encodings
@@ -526,22 +573,31 @@ fn lease_command(
             request_nonce: job.request_nonce.to_vec(),
             lease_id: active.lease_id.to_vec(),
             lease_duration_ms: duration_ms(config.lease_duration),
-            kind: wire::MeasureKind::Single as i32,
+            kind: job.submission.kind.wire() as i32,
             engine: Some(engine_identity_to_wire(job.submission.engine)),
             measure_config_hash: job.submission.options.config_hash.as_bytes().to_vec(),
             measure_config_encoding: job.submission.measure_config.encoding,
             measure_config_payload: job.submission.measure_config.payload.clone(),
             target_device_profile_hash: job.submission.target_device_profile_hash.to_vec(),
-            subjects: vec![wire::GraphSubject {
-                logical_index: 0,
-                graph_hash: job.submission.artifact.graph_hash.as_bytes().to_vec(),
-                artifact: Some(wire::GraphArtifactRef {
-                    artifact_digest: job.descriptor.digest.to_vec(),
-                    artifact_size: job.descriptor.size,
-                    format_kind: job.descriptor.format_kind as i32,
-                    adapter_format_id: job.descriptor.adapter_format_id,
-                }),
-            }],
+            subjects: job
+                .submission
+                .subjects
+                .iter()
+                .zip(&job.descriptors)
+                .enumerate()
+                .map(
+                    |(logical_index, (subject, descriptor))| wire::GraphSubject {
+                        logical_index: logical_index as u32,
+                        graph_hash: subject.graph_hash.as_bytes().to_vec(),
+                        artifact: Some(wire::GraphArtifactRef {
+                            artifact_digest: descriptor.digest.to_vec(),
+                            artifact_size: descriptor.size,
+                            format_kind: descriptor.format_kind as i32,
+                            adapter_format_id: descriptor.adapter_format_id,
+                        }),
+                    },
+                )
+                .collect(),
         })),
     }
 }
@@ -577,10 +633,9 @@ fn requeue_active(
     }
     if let Some(agent) = state.agents.get_mut(&active.device_id)
         && agent.session_id == active.current_session_id
-        && agent.active == Some((job_id, active.lease_id))
+        && agent.active.get(&job_id) == Some(&active.lease_id)
     {
-        agent.active = None;
-        agent.ready = false;
+        agent.active.remove(&job_id);
     }
 }
 
@@ -602,10 +657,13 @@ fn cancel_job(inner: &CoordinatorInner, job_id: JobId) {
                 reason: wire::CancelReason::CancelCallerDeadline as i32,
             })),
         }));
-        agent.active = None;
-        agent.ready = false;
+        if agent.active.get(&job_id) == Some(&active.lease_id) {
+            agent.active.remove(&job_id);
+        }
     }
-    release_artifact(&mut state, job.descriptor.digest);
+    for descriptor in &job.descriptors {
+        release_artifact(&mut state, descriptor.digest);
+    }
 }
 
 fn disconnect(inner: &CoordinatorInner, device_id: DeviceId, session_id: SessionId) {
@@ -616,19 +674,24 @@ fn disconnect(inner: &CoordinatorInner, device_id: DeviceId, session_id: Session
     if agent.session_id != session_id {
         return;
     }
-    let active = agent.active;
-    state.agents.remove(&device_id);
-    if let Some((job_id, lease_id)) = active {
+    remove_agent_session(&mut state, device_id);
+    schedule(&inner.config, &mut state);
+}
+
+fn remove_agent_session(state: &mut CoordinatorState, device_id: DeviceId) {
+    let Some(agent) = state.agents.remove(&device_id) else {
+        return;
+    };
+    for (job_id, lease_id) in agent.active {
         let active = state.jobs.get(&job_id).and_then(|job| match job.state {
             JobState::Offered(active) if active.lease_id == lease_id => Some((active, false)),
             JobState::Running(active) if active.lease_id == lease_id => Some((active, true)),
             _ => None,
         });
         if let Some((active, preserve_for_recovery)) = active {
-            requeue_active(&mut state, job_id, active, preserve_for_recovery);
+            requeue_active(state, job_id, active, preserve_for_recovery);
         }
     }
-    schedule(&inner.config, &mut state);
 }
 
 fn lock_state(inner: &CoordinatorInner) -> MutexGuard<'_, CoordinatorState> {
@@ -665,7 +728,7 @@ impl MeasureFleet for Coordinator {
             Some(agent_event::Event::Hello(hello)) => hello,
             _ => return Err(Status::invalid_argument("first event must be AgentHello")),
         };
-        validate_hello(&hello).map_err(status_for_error)?;
+        validate_hello(&self.inner.config, &hello).map_err(status_for_error)?;
         let device_id = DeviceId::from_slice(&hello.device_id).map_err(status_for_error)?;
         authenticate_enrollment(&self.inner.config.enrollment, peer_fingerprint, device_id)
             .map_err(status_for_error)?;
@@ -674,25 +737,12 @@ impl MeasureFleet for Coordinator {
             .as_ref()
             .ok_or_else(|| Status::invalid_argument("device profile is required"))?;
         let profile_hash = device_profile_hash(profile);
+        let slot_capacity = hello.job_slots;
         let session_id = SessionId::random();
         let (command_tx, command_rx) = mpsc::channel(self.inner.config.command_capacity);
         let recovery_dispositions = {
             let mut state = lock_state(&self.inner);
-            if let Some(previous) = state.agents.remove(&device_id)
-                && let Some((job_id, lease_id)) = previous.active
-                && let Some((active, preserve_for_recovery)) =
-                    state.jobs.get(&job_id).and_then(|job| match job.state {
-                        JobState::Offered(active) if active.lease_id == lease_id => {
-                            Some((active, false))
-                        }
-                        JobState::Running(active) if active.lease_id == lease_id => {
-                            Some((active, true))
-                        }
-                        _ => None,
-                    })
-            {
-                requeue_active(&mut state, job_id, active, preserve_for_recovery);
-            }
+            remove_agent_session(&mut state, device_id);
             let (recoveries, active) = reconcile_recoveries(
                 &self.inner.config,
                 &mut state,
@@ -709,7 +759,8 @@ impl MeasureFleet for Coordinator {
                     capabilities: hello.capabilities,
                     command_tx: command_tx.clone(),
                     peer_fingerprint,
-                    ready: false,
+                    slot_capacity,
+                    free_slots: 0,
                     draining: false,
                     active,
                 },
@@ -766,8 +817,12 @@ impl MeasureFleet for Coordinator {
                 .jobs
                 .get(&job_id)
                 .ok_or_else(|| Status::not_found("unknown job"))?;
-            validate_active_lease(job, agent, lease_id)?;
-            if job.descriptor.digest != digest {
+            validate_active_lease(job_id, job, agent, lease_id)?;
+            if !job
+                .descriptors
+                .iter()
+                .any(|descriptor| descriptor.digest == digest)
+            {
                 return Err(Status::permission_denied(
                     "artifact is not authorized for this lease",
                 ));
@@ -847,6 +902,7 @@ impl MeasureFleet for Coordinator {
             .ok_or_else(|| Status::not_found("unknown job"))?;
         validate_report(
             &self.inner.config,
+            job_id,
             job,
             agent,
             current_session,
@@ -881,10 +937,11 @@ impl MeasureFleet for Coordinator {
             state.queue.remove(index);
         }
         if let Some(agent) = state.agents.get_mut(&device_id) {
-            agent.active = None;
-            agent.ready = false;
+            agent.active.remove(&job_id);
         }
-        release_artifact(&mut state, job.descriptor.digest);
+        for descriptor in &job.descriptors {
+            release_artifact(&mut state, descriptor.digest);
+        }
         if let Some(reply) = job.reply.take() {
             let _ = reply.send(Ok(CommittedMeasurement {
                 job_id,
@@ -923,14 +980,16 @@ impl Coordinator {
                 if SessionId::from_slice(&ready.session_id)? != session_id {
                     return Err(ServiceError::protocol("ready session id mismatch"));
                 }
-                if ready.free_slots > 1 {
-                    return Err(ServiceError::protocol("free_slots must be zero or one"));
-                }
                 let agent = state.agents.get_mut(&device_id).unwrap();
-                if ready.free_slots == 1 && agent.active.is_some() {
-                    return Err(ServiceError::protocol("busy agent advertised a free slot"));
+                if ready.free_slots > agent.slot_capacity {
+                    return Err(ServiceError::protocol(
+                        "free_slots exceeds the advertised agent slot capacity",
+                    ));
                 }
-                agent.ready = ready.free_slots == 1;
+                let active = u32::try_from(agent.active.len()).unwrap_or(u32::MAX);
+                agent.free_slots = ready
+                    .free_slots
+                    .min(agent.slot_capacity.saturating_sub(active));
             }
             Some(agent_event::Event::Accepted(accepted)) => {
                 let active = validate_agent_lease_ids(
@@ -988,7 +1047,7 @@ impl Coordinator {
                 }
                 let agent = state.agents.get_mut(&device_id).unwrap();
                 agent.draining = true;
-                agent.ready = false;
+                agent.free_slots = 0;
             }
             Some(agent_event::Event::Hello(_)) => {
                 return Err(ServiceError::protocol("AgentHello appeared more than once"));
@@ -1000,11 +1059,17 @@ impl Coordinator {
     }
 }
 
-fn validate_hello(hello: &wire::AgentHello) -> ServiceResult<()> {
+fn validate_hello(config: &CoordinatorConfig, hello: &wire::AgentHello) -> ServiceResult<()> {
     if hello.protocol_major != PROTOCOL_MAJOR {
         return Err(ServiceError::protocol(format!(
             "unsupported protocol major {}",
             hello.protocol_major
+        )));
+    }
+    if hello.protocol_minor != PROTOCOL_MINOR {
+        return Err(ServiceError::protocol(format!(
+            "unsupported protocol minor {}",
+            hello.protocol_minor
         )));
     }
     DeviceId::from_slice(&hello.device_id)?;
@@ -1021,6 +1086,15 @@ fn validate_hello(hello: &wire::AgentHello) -> ServiceResult<()> {
             "at least one engine capability is required",
         ));
     }
+    if hello.job_slots == 0
+        || usize::try_from(hello.job_slots)
+            .ok()
+            .is_none_or(|slots| slots > config.command_capacity)
+    {
+        return Err(ServiceError::protocol(
+            "agent job_slots exceeds the coordinator capacity",
+        ));
+    }
     for capability in &hello.capabilities {
         let identity = capability
             .engine
@@ -1034,13 +1108,19 @@ fn validate_hello(hello: &wire::AgentHello) -> ServiceResult<()> {
             return Err(ServiceError::protocol("capability lists must be non-empty"));
         }
     }
-    if hello.recoveries.len() > 1 {
+    if hello.recoveries.len() > hello.job_slots as usize {
         return Err(ServiceError::protocol(
-            "version 1 permits at most one lease recovery",
+            "agent supplied too many lease recoveries",
         ));
     }
+    let mut recovered_jobs = BTreeSet::new();
     for recovery in &hello.recoveries {
-        JobId::from_slice(&recovery.job_id)?;
+        let job_id = JobId::from_slice(&recovery.job_id)?;
+        if !recovered_jobs.insert(job_id) {
+            return Err(ServiceError::protocol(
+                "agent supplied duplicate lease recoveries",
+            ));
+        }
         LeaseId::from_slice(&recovery.lease_id)?;
         let phase = wire::JobPhase::try_from(recovery.phase)
             .map_err(|_| ServiceError::protocol("unknown recovery phase"))?;
@@ -1064,7 +1144,7 @@ fn reconcile_recoveries(
     recoveries: &[wire::LeaseRecovery],
 ) -> ServiceResult<RecoveryReconciliation> {
     let mut dispositions = Vec::with_capacity(recoveries.len());
-    let mut agent_active = None;
+    let mut agent_active = HashMap::with_capacity(recoveries.len());
     for recovery in recoveries {
         let job_id = JobId::from_slice(&recovery.job_id)?;
         let lease_id = LeaseId::from_slice(&recovery.lease_id)?;
@@ -1085,7 +1165,7 @@ fn reconcile_recoveries(
                     if let Some(index) = state.queue.iter().position(|queued| *queued == job_id) {
                         state.queue.remove(index);
                     }
-                    agent_active = Some((job_id, lease_id));
+                    agent_active.insert(job_id, lease_id);
                     wire::RecoveryAction::RecoverySubmitReport
                 }
                 _ => wire::RecoveryAction::RecoveryCancel,
@@ -1216,6 +1296,7 @@ fn authenticate_session(
 }
 
 fn validate_active_lease(
+    job_id: JobId,
     job: &Job,
     agent: (DeviceId, &AgentSession),
     lease_id: LeaseId,
@@ -1227,6 +1308,7 @@ fn validate_active_lease(
     if active.device_id != agent.0
         || active.current_session_id != agent.1.session_id
         || active.lease_id != lease_id
+        || agent.1.active.get(&job_id) != Some(&lease_id)
     {
         return Err(Status::permission_denied("lease identity mismatch"));
     }
@@ -1246,6 +1328,15 @@ fn validate_agent_lease_ids(
     }
     let job_id = JobId::from_slice(event_job)?;
     let lease_id = LeaseId::from_slice(event_lease)?;
+    let agent = state
+        .agents
+        .get(&device_id)
+        .ok_or_else(|| ServiceError::protocol("event agent is not connected"))?;
+    if agent.active.get(&job_id) != Some(&lease_id) {
+        return Err(ServiceError::protocol(
+            "event references a lease not active on the agent",
+        ));
+    }
     let job = state
         .jobs
         .get(&job_id)
@@ -1267,6 +1358,7 @@ fn validate_agent_lease_ids(
 
 fn validate_report(
     config: &CoordinatorConfig,
+    job_id: JobId,
     job: &Job,
     agent: (DeviceId, &AgentSession),
     current_session: SessionId,
@@ -1281,6 +1373,7 @@ fn validate_report(
     if active.device_id != agent.0
         || active.current_session_id != current_session
         || active.lease_id != lease_id
+        || agent.1.active.get(&job_id) != Some(&lease_id)
     {
         return Err(Status::failed_precondition("stale lease"));
     }
@@ -1289,24 +1382,57 @@ fn validate_report(
         || report.measurement_key != job.measurement_key.as_bytes()
         || report.request_nonce != job.request_nonce.as_bytes()
         || report.measure_config_hash != job.submission.options.config_hash.as_bytes()
-        || report.kind != wire::MeasureKind::Single as i32
+        || report.kind != job.submission.kind.wire() as i32
         || report.engine.as_ref() != Some(&engine_identity_to_wire(job.submission.engine))
     {
         return Err(Status::invalid_argument("report identity mismatch"));
     }
-    if report.subjects.len() != 1
-        || report.subjects[0].logical_index != 0
-        || report.subjects[0].graph_hash != job.submission.artifact.graph_hash.as_bytes()
-    {
+    if report.subjects.len() != job.submission.subjects.len() {
         return Err(Status::invalid_argument("report subject mismatch"));
     }
-    if report.subjects[0].engine_metadata.len() > config.max_engine_metadata_bytes {
-        return Err(Status::resource_exhausted("engine metadata is too large"));
+    for (logical_index, (actual, expected)) in report
+        .subjects
+        .iter()
+        .zip(&job.submission.subjects)
+        .enumerate()
+    {
+        if actual.logical_index != logical_index as u32
+            || actual.graph_hash != expected.graph_hash.as_bytes()
+        {
+            return Err(Status::invalid_argument("report subject mismatch"));
+        }
+        if actual.engine_metadata.len() > config.max_engine_metadata_bytes {
+            return Err(Status::resource_exhausted("engine metadata is too large"));
+        }
     }
-    if report.samples.len() > config.max_samples_per_subject
-        || report.telemetry.len() > config.max_telemetry_samples
+    let sample_limit = config
+        .max_samples_per_subject
+        .checked_mul(report.subjects.len())
+        .ok_or_else(|| Status::resource_exhausted("report sample limit overflow"))?;
+    if report.samples.len() > sample_limit || report.telemetry.len() > config.max_telemetry_samples
     {
         return Err(Status::resource_exhausted("report evidence is too large"));
+    }
+    let mut subject_sample_indices = vec![0_u32; report.subjects.len()];
+    for (schedule_index, sample) in report.samples.iter().enumerate() {
+        if sample.schedule_index != schedule_index as u32 {
+            return Err(Status::invalid_argument(
+                "report sample schedule is not contiguous",
+            ));
+        }
+        let logical_index = usize::try_from(sample.logical_index)
+            .map_err(|_| Status::invalid_argument("sample subject index does not fit usize"))?;
+        let expected_index = subject_sample_indices
+            .get_mut(logical_index)
+            .ok_or_else(|| Status::invalid_argument("sample references an unknown subject"))?;
+        if sample.subject_sample_index != *expected_index {
+            return Err(Status::invalid_argument(
+                "subject sample indices are not contiguous",
+            ));
+        }
+        *expected_index = expected_index
+            .checked_add(1)
+            .ok_or_else(|| Status::resource_exhausted("subject sample index overflow"))?;
     }
     let outcome = wire::MeasureAttemptOutcome::try_from(report.outcome)
         .map_err(|_| Status::invalid_argument("unknown report outcome"))?;
@@ -1315,10 +1441,13 @@ fn validate_report(
             return Err(Status::invalid_argument("report outcome is unspecified"));
         }
         wire::MeasureAttemptOutcome::MeasureOutcomeSucceeded => {
-            let reward = report.subjects[0]
-                .scalar_reward
-                .ok_or_else(|| Status::invalid_argument("successful report omitted reward"))?;
-            if !reward.is_finite() || report.failure.is_some() {
+            if report.failure.is_some()
+                || report.subjects.iter().any(|subject| {
+                    subject
+                        .scalar_reward
+                        .is_none_or(|reward| !reward.is_finite())
+                })
+            {
                 return Err(Status::invalid_argument("successful report is malformed"));
             }
         }
@@ -1327,7 +1456,11 @@ fn validate_report(
                 .failure
                 .as_ref()
                 .ok_or_else(|| Status::invalid_argument("failed report omitted detail"))?;
-            if report.subjects[0].scalar_reward.is_some() {
+            if report
+                .subjects
+                .iter()
+                .any(|subject| subject.scalar_reward.is_some())
+            {
                 return Err(Status::invalid_argument(
                     "failed report included scalar reward",
                 ));

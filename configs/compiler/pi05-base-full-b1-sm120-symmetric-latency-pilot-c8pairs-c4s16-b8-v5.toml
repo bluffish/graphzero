@@ -1,0 +1,31 @@
+extends = "pi05-base-full-b1-sm120-symmetric-20k-c4s48-b8-v4.toml"
+
+[trainer]
+total_steps = 200
+min_startup_rows = 240
+permanent_checkpoint_interval = 200
+
+[selfplay]
+lanes = 8
+workers_per_lane = 1
+simulations = 16
+max_considered = 4
+max_steps = 15
+max_candidates = 256
+max_batch = 8
+eval_processes = 1
+
+[engine]
+compiler_deployment = "configs/compiler/pi05-base-full-b1-sm120-performance-only-end-to-end-nvidia-v5.toml"
+
+[measurement]
+listen = "0.0.0.0:50071"
+receipt_dir = "/opt/dlami/nvme/graphzero-measure-receipts/pi05-v5-latency-pilot-c8pairs-c4s16-b8"
+
+[wandb]
+run_name = "compiler-pi05-v5-latency-pilot-c8pairs-c4s16-b8"
+
+[paths]
+run_dir = "/opt/dlami/nvme/graphzero-runs/pi05-v5-latency-pilot-c8pairs-c4s16-b8"
+replay_dir = "/opt/dlami/nvme/graphzero-replay/pi05-v5-latency-pilot-c8pairs-c4s16-b8"
+sample_socket = "/tmp/gz-pi05-v5-latency-pilot-c8pairs-c4s16-b8.sock"

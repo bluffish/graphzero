@@ -68,14 +68,14 @@ def count_batch(node_counts: list[int], action_counts: list[int], row_count: int
         capacity * max_nodes * 2,
         0,
         capacity * 4,
-        capacity * max_edges * 2,
-        capacity * max_edges * 2,
+        capacity * max_edges * 4,
+        capacity * max_edges * 4,
         capacity * max_edges,
         capacity * 4,
         capacity * max_actions * 2,
         capacity * max_actions * 2,
         capacity * max_actions,
-        capacity * max_actions * max_subjects * 2,
+        capacity * max_actions * max_subjects * 4,
         capacity * 8,
         capacity * 2,
         capacity,
@@ -86,8 +86,8 @@ def count_batch(node_counts: list[int], action_counts: list[int], row_count: int
         capacity * max_nodes * 2,
         0,
         capacity * 4,
-        capacity * max_edges * 2,
-        capacity * max_edges * 2,
+        capacity * max_edges * 4,
+        capacity * max_edges * 4,
         capacity * max_edges,
         capacity * 8,
     ]:
@@ -112,8 +112,8 @@ def count_batch(node_counts: list[int], action_counts: list[int], row_count: int
         max_subjects,
         0,
     )
-    out[sections[11] : sections[11] + capacity * max_actions * max_subjects * 2] = b"\xff" * (
-        capacity * max_actions * max_subjects * 2
+    out[sections[11] : sections[11] + capacity * max_actions * max_subjects * 4] = b"\xff" * (
+        capacity * max_actions * max_subjects * 4
     )
     for index, value in enumerate(node_counts):
         struct.pack_into("<I", out, sections[0] + index * 4, value)

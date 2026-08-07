@@ -20,6 +20,9 @@ class TrainerConfig:
     # Zero shares the policy batch, preserving the historical trainer path.
     # A positive value samples and stages an independent value batch.
     value_batch: int = 0
+    # Fraction of independent value batches sampled uniformly from terminal
+    # rows, one per retained episode. Policy batches remain row-uniform.
+    value_terminal_fraction: float = 0.0
     window_rows: int = 200_000
     # Zero inherits window_rows. This counts source rows; paired value
     # training evaluates both orientations of every sampled source row.
@@ -43,6 +46,7 @@ class TrainerConfig:
     value_v8_weight: float = 0.0
     value_v32_weight: float = 0.0
     terminal_score_weight: float = 0.0
+    terminal_score_target: str = "node-count"
     soft_policy_weight: float = 0.0
     soft_policy_temperature: float = 4.0
     # Scale the auxiliary policy gradient entering its shared policy/trunk
@@ -55,6 +59,7 @@ class TrainerConfig:
     nesterov: bool = True
     ns_steps: int = 5
     policy_init: str = "default"
+    value_init: str = "default"
     ema_decay: float = 0.999
     grad_clip: float = 1.0
     min_startup_rows: int = 256
@@ -119,6 +124,7 @@ class SelfplayConfig:
     replay_retain: int = 0
     eval_device: str = "cuda:0"
     eval_poll_interval: float = 10.0
+    eval_max_resident_model_generations: int = 2
     actor_checkpoint_pointer: str = "latest.json"
     seed: int = 0
     max_batch: int = 16
@@ -127,6 +133,8 @@ class SelfplayConfig:
     no_backtrack: bool = True
     gumbel_noise_overlap: float = 0.5
     mask_stop: bool = False
+    symmetric_reward_tie_epsilon: float = 0.0
+    symmetric_reward_target_scale: float = 0.0
     tree_reuse: bool = True
     eval_processes: int = 1
     admission_stagger_ms: int = 0
@@ -144,6 +152,17 @@ class MeasurementConfig:
     profile: str = ""
     receipt_dir: str = ""
     startup_timeout_ms: int = 60_000
+
+
+@dataclass(frozen=True, slots=True)
+class EngineConfig:
+    kind: str = "whittle"
+    compiler_deployment: str = ""
+    compiler_max_nodes: int = 0
+    compiler_max_edges: int = 0
+    compiler_max_subjects: int = 0
+    compiler_feature_layout: str = "expanded-ports"
+    measure_samples: int = 1
 
 
 @dataclass(frozen=True, slots=True)
@@ -174,6 +193,7 @@ class RunConfig:
     wandb: WandbConfig
     arch: ArchConfig
     measurement: MeasurementConfig
+    engine: EngineConfig
 
 
 def resolved_trainer_seeds(config: TrainerConfig) -> tuple[int, int]:
@@ -199,6 +219,10 @@ def _validate(config: RunConfig) -> RunConfig:
         raise ValueError("batch must be positive")
     if config.trainer.value_batch < 0:
         raise ValueError("value_batch must be non-negative")
+    if not math.isfinite(config.trainer.value_terminal_fraction) or not (
+        0.0 <= config.trainer.value_terminal_fraction <= 1.0
+    ):
+        raise ValueError("value_terminal_fraction must be finite and in [0, 1]")
     if config.trainer.window_rows < 1:
         raise ValueError("window_rows must be positive")
     if config.trainer.value_window_rows < 0:
@@ -223,6 +247,10 @@ def _validate(config: RunConfig) -> RunConfig:
         "v8-v32-score-soft-policy-v2",
     }:
         raise ValueError("auxiliary task weights require v8-v32-score model heads")
+    if config.trainer.terminal_score_target not in ("node-count", "log1p-cost-ms"):
+        raise ValueError(
+            f"unknown terminal_score_target: {config.trainer.terminal_score_target}"
+        )
     if (
         not math.isfinite(config.trainer.soft_policy_weight)
         or config.trainer.soft_policy_weight < 0.0
@@ -283,8 +311,13 @@ def _validate(config: RunConfig) -> RunConfig:
         raise ValueError("ns_steps must be positive")
     if config.trainer.policy_init not in ("default", "neutral"):
         raise ValueError(f"unsupported policy_init: {config.trainer.policy_init}")
-    if config.trainer.policy_init == "neutral" and config.arch.policy_head != "pointer":
-        raise ValueError("policy_init = 'neutral' requires policy_head = 'pointer'")
+    if config.trainer.policy_init == "neutral" and config.arch.policy_head not in {
+        "pointer",
+        "factorized-pointer",
+    }:
+        raise ValueError("policy_init = 'neutral' requires a pointer policy head")
+    if config.trainer.value_init not in ("default", "zero"):
+        raise ValueError(f"unsupported value_init: {config.trainer.value_init}")
     if config.trainer.resume and config.trainer.init_checkpoint:
         raise ValueError("resume and init_checkpoint are mutually exclusive")
     if config.trainer.init_checkpoint_scope not in ("all", "policy"):
@@ -321,11 +354,25 @@ def _validate(config: RunConfig) -> RunConfig:
         ("max_candidates", config.selfplay.max_candidates),
         ("max_batch", config.selfplay.max_batch),
         ("eval_processes", config.selfplay.eval_processes),
+        (
+            "eval_max_resident_model_generations",
+            config.selfplay.eval_max_resident_model_generations,
+        ),
     ):
         if value < 1:
             raise ValueError(f"{name} must be positive")
+    if config.selfplay.eval_max_resident_model_generations < 2:
+        raise ValueError("eval_max_resident_model_generations must be at least two")
     if config.selfplay.eval_processes > config.selfplay.lanes:
         raise ValueError("eval_processes cannot exceed lanes")
+    eval_devices = [device.strip() for device in config.selfplay.eval_device.split(",")]
+    if any(not device for device in eval_devices) or len(eval_devices) not in (
+        1,
+        config.selfplay.eval_processes,
+    ):
+        raise ValueError(
+            "eval_device requires one device or one comma-separated device per evaluator process"
+        )
     if config.selfplay.admission_stagger_ms < 0:
         raise ValueError("admission_stagger_ms must be non-negative")
     if config.selfplay.admission_smoothing and config.selfplay.admission_stagger_ms:
@@ -358,10 +405,71 @@ def _validate(config: RunConfig) -> RunConfig:
         raise ValueError("selfplay seed must fit an unsigned 64-bit integer")
     if not config.selfplay.mask_stop and not config.selfplay.position_features:
         raise ValueError("STOP-enabled symmetric selfplay requires position_features = true")
+    if (
+        not math.isfinite(config.selfplay.symmetric_reward_tie_epsilon)
+        or config.selfplay.symmetric_reward_tie_epsilon < 0.0
+    ):
+        raise ValueError(
+            "symmetric_reward_tie_epsilon must be finite and non-negative"
+        )
+    if (
+        not math.isfinite(config.selfplay.symmetric_reward_target_scale)
+        or config.selfplay.symmetric_reward_target_scale < 0.0
+    ):
+        raise ValueError(
+            "symmetric_reward_target_scale must be finite and non-negative"
+        )
+    if (
+        config.selfplay.symmetric_reward_target_scale > 0.0
+        and config.selfplay.symmetric_reward_tie_epsilon != 0.0
+    ):
+        raise ValueError(
+            "graded symmetric targets require symmetric_reward_tie_epsilon = 0"
+        )
     if config.arch.state_input != "joint-board":
         raise ValueError("symmetric selfplay requires state_input = 'joint-board'")
     if config.arch.value_input != "single":
         raise ValueError("symmetric selfplay requires value_input = 'single'")
+    if config.engine.kind not in ("whittle", "compiler"):
+        raise ValueError(f"unknown engine kind: {config.engine.kind}")
+    if config.engine.measure_samples < 1:
+        raise ValueError("engine.measure_samples must be positive")
+    compiler_fields = (
+        config.engine.compiler_deployment,
+        config.engine.compiler_max_nodes,
+        config.engine.compiler_max_edges,
+        config.engine.compiler_max_subjects,
+        config.engine.compiler_feature_layout != "expanded-ports",
+    )
+    if config.engine.kind == "whittle":
+        if any(compiler_fields):
+            raise ValueError("compiler engine fields require engine.kind = 'compiler'")
+        if (
+            config.trainer.terminal_score_weight > 0.0
+            and config.trainer.terminal_score_target != "node-count"
+        ):
+            raise ValueError("Whittle terminal score requires node-count targets")
+    else:
+        if not config.engine.compiler_deployment:
+            raise ValueError("compiler engine requires compiler_deployment")
+        for name, value in (
+            ("compiler_max_nodes", config.engine.compiler_max_nodes),
+            ("compiler_max_edges", config.engine.compiler_max_edges),
+            ("compiler_max_subjects", config.engine.compiler_max_subjects),
+        ):
+            if value < 1:
+                raise ValueError(f"compiler engine requires positive {name}")
+        if config.engine.compiler_max_subjects > 0xFF:
+            raise ValueError("compiler_max_subjects exceeds u8 wire width")
+        if config.engine.compiler_feature_layout not in ("expanded-ports", "compact-v1"):
+            raise ValueError("unknown compiler_feature_layout")
+        if not config.measurement.enabled:
+            raise ValueError("compiler engine requires distributed measurement")
+        if (
+            config.trainer.terminal_score_weight > 0.0
+            and config.trainer.terminal_score_target != "log1p-cost-ms"
+        ):
+            raise ValueError("compiler terminal score requires log1p-cost-ms targets")
     if config.measurement.enabled:
         if not config.measurement.listen:
             raise ValueError("measurement.listen is required")
@@ -369,7 +477,6 @@ def _validate(config: RunConfig) -> RunConfig:
             ("server_cert", config.measurement.server_cert),
             ("server_key", config.measurement.server_key),
             ("client_ca", config.measurement.client_ca),
-            ("profile", config.measurement.profile),
             ("receipt_dir", config.measurement.receipt_dir),
         ):
             if not value:
@@ -389,6 +496,10 @@ def _validate(config: RunConfig) -> RunConfig:
                 )
         if config.measurement.startup_timeout_ms < 1:
             raise ValueError("measurement.startup_timeout_ms must be positive")
+        if config.engine.kind == "whittle" and not config.measurement.profile:
+            raise ValueError("measurement.profile is required for Whittle")
+        if config.engine.kind == "compiler" and config.measurement.profile:
+            raise ValueError("measurement.profile is Whittle-only")
     return config
 
 
@@ -400,7 +511,7 @@ def load_config(
     data = load_config_table(Path(path))
     unknown_sections = (
         set(data)
-        - {"trainer", "selfplay", "wandb", "arch", "paths", "measurement"}
+        - {"trainer", "selfplay", "wandb", "arch", "paths", "measurement", "engine"}
         - extension_sections
     )
     if unknown_sections:
@@ -419,6 +530,7 @@ def load_config(
         MeasurementConfig,
         data.get("measurement", {}),
     )
+    engine = dataclass_from_dict(EngineConfig, data.get("engine", {}))
     raw_paths = data.get("paths", {})
     if not isinstance(raw_paths, dict):
         raise ValueError("[paths] must be a table")
@@ -468,6 +580,11 @@ def load_config(
             agents=tuple(agents),
             receipt_dir=str(Path(measurement.receipt_dir).absolute()),
         )
+    if engine.compiler_deployment:
+        engine = replace(
+            engine,
+            compiler_deployment=str(Path(engine.compiler_deployment).absolute()),
+        )
     return _validate(
         RunConfig(
             trainer=trainer,
@@ -483,6 +600,7 @@ def load_config(
             wandb=wandb,
             arch=arch,
             measurement=measurement,
+            engine=engine,
         )
     )
 

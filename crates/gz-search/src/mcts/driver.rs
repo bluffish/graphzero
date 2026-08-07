@@ -108,6 +108,11 @@ where
         SearchWork::Measure(work) => engine
             .measure(work.graph, work.options)
             .map(SearchWorkResult::Measure),
+        SearchWork::MeasurePair(work) => {
+            let first = engine.measure(work.graphs[0], work.options)?;
+            let second = engine.measure(work.graphs[1], work.options)?;
+            Ok(SearchWorkResult::MeasurePair([first, second]))
+        }
         SearchWork::Eval(work) => evaluator
             .evaluate(
                 engine,

@@ -21,9 +21,6 @@ impl FeatureRow {
             &self.edges,
             schema,
         )?;
-        if self.actions.is_empty() {
-            return Err(FeatureError::InvalidRow("actions must include STOP"));
-        }
         if self.actions.len() > config.max_actions as usize {
             return Err(FeatureError::ActionOverflow {
                 max: config.max_actions,

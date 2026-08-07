@@ -83,6 +83,7 @@ message AgentHello {
   DeviceProfile profile = 5;
   repeated EngineCapability capabilities = 6;
   repeated LeaseRecovery recoveries = 7;
+  uint32 job_slots = 8;
 }
 
 message AgentWelcome {

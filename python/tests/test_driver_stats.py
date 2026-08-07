@@ -48,3 +48,9 @@ def test_stats_tracker_ignores_malformed_lines() -> None:
     tracker.observe_eval({"batches": "x"})
     tracker.observe_measure({"appended": "1"})
     assert tracker.step_fields() == {}
+
+
+def test_stats_tracker_reports_actor_checkpoint_step() -> None:
+    tracker = SelfplayStatsTracker()
+    tracker.observe_checkpoint_swap({"training_step": "320"})
+    assert tracker.step_fields()["actor_training_step"] == 320

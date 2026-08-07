@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex};
 
 pub(super) struct ModelLeaseRegistry {
     state: Mutex<ModelLeaseState>,
+    max_resident_generations: usize,
 }
 
 struct ModelLeaseState {
@@ -25,11 +26,18 @@ struct ModelLease {
 }
 
 impl ModelLeaseRegistry {
-    pub(super) fn new(current: ModelGeneration) -> EngineResult<Self> {
+    pub(super) fn new(
+        current: ModelGeneration,
+        max_resident_generations: usize,
+    ) -> EngineResult<Self> {
         if current.id == 0 {
             return Err(internal("zero model generation"));
         }
+        if max_resident_generations < 2 {
+            return Err(internal("resident model generation capacity below two"));
+        }
         Ok(Self {
+            max_resident_generations,
             state: Mutex::new(ModelLeaseState {
                 current,
                 generations: vec![ModelGenerationState {
@@ -82,7 +90,7 @@ impl ModelLeaseRegistry {
             .iter()
             .all(|generation| generation.model != model)
         {
-            if state.generations.len() >= 2 {
+            if state.generations.len() >= self.max_resident_generations {
                 return Err(internal("too many resident model generations"));
             }
             state

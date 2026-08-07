@@ -45,7 +45,16 @@ def model_class():
                 arch.dim,
                 padding_idx=0,
             )
-            self.policy = PointerPolicyHead(arch, _action_feat_dim(arch))
+            policy_class = (
+                FactorizedPointerPolicyHead
+                if arch.policy_head == "factorized-pointer"
+                else PointerPolicyHead
+            )
+            self.policy = policy_class(
+                arch,
+                _action_feat_dim(arch),
+                schema.action_kind_vocab_size,
+            )
             self.value = _mlp(
                 nn,
                 arch.dim,
@@ -95,7 +104,11 @@ def model_class():
                     arch.dim,
                     padding_idx=0,
                 )
-                self.soft_policy = PointerPolicyHead(arch, _action_feat_dim(arch))
+                self.soft_policy = policy_class(
+                    arch,
+                    _action_feat_dim(arch),
+                    schema.action_kind_vocab_size,
+                )
 
         def forward(
             self,
@@ -203,7 +216,12 @@ def model_class():
                 node_mask,
                 self.kind_embedding,
             )
-            return self.policy(g_readout, action_feat, action_mask)
+            return self.policy(
+                g_readout,
+                action_feat,
+                batch.action_kind,
+                action_mask,
+            )
 
         def _training_policy_logits(
             self,
@@ -225,7 +243,12 @@ def model_class():
                 node_mask,
                 self.kind_embedding,
             )
-            logits = self.policy(g_readout, action_feat, action_mask)
+            logits = self.policy(
+                g_readout,
+                action_feat,
+                batch.action_kind,
+                action_mask,
+            )
             soft_h = _scale_gradient(h, soft_policy_trunk_grad_scale)
             soft_g_readout = _scale_gradient(
                 g_readout,
@@ -241,6 +264,7 @@ def model_class():
             soft_policy_logits = self.soft_policy(
                 soft_g_readout,
                 soft_action_feat,
+                batch.action_kind,
                 soft_action_mask,
             )
             return logits, soft_policy_logits
@@ -328,8 +352,14 @@ def model_class():
         # isolation and its logit scale is unbounded.
         CLIP = 10.0
 
-        def __init__(self, arch: ArchConfig, action_feat_dim: int) -> None:
+        def __init__(
+            self,
+            arch: ArchConfig,
+            action_feat_dim: int,
+            action_kind_vocab_size: int,
+        ) -> None:
             super().__init__()
+            del action_kind_vocab_size
             dim = arch.dim
             self.heads = arch.heads
             self.token_proj = nn.Linear(action_feat_dim, dim)
@@ -354,13 +384,22 @@ def model_class():
                 bias=False,
             )
 
-        def forward(self, readout, action_feat, action_mask):
+        def forward(self, readout, action_feat, action_kind, action_mask):
+            del action_kind
             board, tokens = self._representations(readout, action_feat, action_mask)
-            return self._pointer_logits(board, tokens, self.pointer_key)
+            return self._pointer_logits(
+                board,
+                tokens,
+                self.pointer_key,
+                action_mask,
+            )
 
         def _representations(self, readout, action_feat, action_mask):
-            b, a, _ = action_feat.shape
             tokens = self.token_proj(action_feat)
+            return self._glimpse(readout, tokens, action_mask)
+
+        def _glimpse(self, readout, tokens, token_mask):
+            b, a, _ = tokens.shape
             dim = tokens.shape[-1]
             split = dim // self.heads
             query = self.glimpse_query(readout).view(b, self.heads, split)
@@ -369,7 +408,7 @@ def model_class():
             scores = torch.einsum("bhs,bahs->bha", query, keys) / math.sqrt(split)
             # -1e9, not -inf: rows past row_count have zero valid actions,
             # and an all--inf softmax row is NaN.
-            scores = scores.masked_fill(~action_mask.unsqueeze(1), -1.0e9)
+            scores = scores.masked_fill(~token_mask.unsqueeze(1), -1.0e9)
             board = torch.einsum("bha,bahs->bhs", torch.softmax(scores, dim=-1), values)
             board = self.glimpse_unify(board.reshape(b, dim))
             board = board + self.board_ffn(board)
@@ -377,11 +416,121 @@ def model_class():
             tokens = self.pointer_token_norm(tokens)
             return board, tokens
 
-        def _pointer_logits(self, board, tokens, pointer_key):
+        def _pointer_logits(self, board, tokens, pointer_key, action_mask):
             raw = torch.einsum("bd,bad->ba", board, pointer_key(tokens)) / math.sqrt(
                 tokens.shape[-1]
             )
-            return self.CLIP * torch.tanh(raw)
+            weight = action_mask.to(raw.dtype)
+            center = (raw * weight).sum(dim=-1, keepdim=True) / weight.sum(
+                dim=-1,
+                keepdim=True,
+            ).clamp_min(1.0)
+            # Softmax scores are relative. Center before clipping so a common
+            # score offset cannot saturate every valid action at the same
+            # endpoint and erase both policy differences and gradients.
+            return self.CLIP * torch.tanh(raw - center)
+
+    class FactorizedPointerPolicyHead(PointerPolicyHead):
+        def __init__(
+            self,
+            arch: ArchConfig,
+            action_feat_dim: int,
+            action_kind_vocab_size: int,
+        ) -> None:
+            super().__init__(arch, action_feat_dim, action_kind_vocab_size)
+            self.action_kind_vocab_size = action_kind_vocab_size
+            self.family_key = nn.Linear(arch.dim, arch.dim, bias=False)
+
+        def forward(self, readout, action_feat, action_kind, action_mask):
+            kind = action_kind.clamp(0, self.action_kind_vocab_size - 1)
+            tokens = self.token_proj(action_feat)
+            family_tokens, family_count = self._family_tokens(
+                tokens,
+                kind,
+                action_mask,
+            )
+            board, family_tokens = self._glimpse(
+                readout,
+                family_tokens,
+                family_count > 0,
+            )
+            tokens = self.pointer_token_norm(tokens)
+            family_logits = self._family_logits(board, family_tokens, family_count)
+            conditional_logits = self._conditional_logits(
+                board,
+                tokens,
+                kind,
+                action_mask,
+                family_count,
+            )
+            selected_family_logits = torch.gather(family_logits, 1, kind)
+            logits = selected_family_logits + conditional_logits
+            return logits.masked_fill(~action_mask, 0.0)
+
+        def _family_tokens(self, tokens, kind, action_mask):
+            b, _, dim = tokens.shape
+            family_tokens = torch.zeros(
+                (b, self.action_kind_vocab_size, dim),
+                dtype=tokens.dtype,
+                device=tokens.device,
+            )
+            family_tokens.scatter_add_(
+                1,
+                kind.unsqueeze(-1).expand(-1, -1, dim),
+                tokens * action_mask.unsqueeze(-1).to(tokens.dtype),
+            )
+            family_count = torch.zeros(
+                (b, self.action_kind_vocab_size),
+                dtype=tokens.dtype,
+                device=tokens.device,
+            )
+            family_count.scatter_add_(1, kind, action_mask.to(tokens.dtype))
+            family_tokens = family_tokens / family_count.clamp_min(1.0).unsqueeze(-1)
+            return family_tokens, family_count
+
+        def _family_logits(self, board, family_tokens, family_count):
+            raw = torch.einsum(
+                "bd,bkd->bk",
+                board,
+                self.family_key(family_tokens),
+            ) / math.sqrt(family_tokens.shape[-1])
+            family_mask = family_count > 0
+            weight = family_mask.to(raw.dtype)
+            center = (raw * weight).sum(dim=-1, keepdim=True) / weight.sum(
+                dim=-1,
+                keepdim=True,
+            ).clamp_min(1.0)
+            return self.CLIP * torch.tanh(raw - center)
+
+        def _conditional_logits(
+            self,
+            board,
+            tokens,
+            kind,
+            action_mask,
+            family_count,
+        ):
+            raw = torch.einsum(
+                "bd,bad->ba",
+                board,
+                self.pointer_key(tokens),
+            ) / math.sqrt(tokens.shape[-1])
+            score_family_count = family_count.to(raw.dtype)
+            family_sum = torch.zeros_like(score_family_count)
+            family_sum.scatter_add_(1, kind, raw * action_mask.to(raw.dtype))
+            family_center = family_sum / score_family_count.clamp_min(1.0)
+            centered = raw - torch.gather(family_center, 1, kind)
+            # Normalize conditionals in fp32. Scores are bounded to +/-10, so
+            # exponentiation is safe without a grouped-max reduction. Avoiding
+            # that reduction is important: Inductor's BF16 amax backward
+            # produces NaNs when every candidate ties at neutral initialization.
+            score = (self.CLIP * torch.tanh(centered)).float()
+            score_family_count = score_family_count.float()
+            exp_score = torch.exp(score) * action_mask.to(score.dtype)
+            family_denom = exp_score.new_zeros(score_family_count.shape)
+            family_denom.scatter_add_(1, kind, exp_score)
+            log_denom = torch.log(torch.gather(family_denom, 1, kind).clamp_min(1.0))
+            return score - log_denom
 
     class GraphLayer(nn.Module):
         def __init__(self, schema: FeatureSchemaConfig, arch: ArchConfig) -> None:

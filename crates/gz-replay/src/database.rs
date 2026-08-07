@@ -3,9 +3,10 @@ use crate::keys::{
     CF_EPISODES, CF_LEGACY_POLICY_ROW_INDEX, CF_LEGACY_VALUE_ROW_INDEX, CF_META, CF_ROW_INDEX,
     CF_ROWS, META_COMPLETED_GAMES, META_CONSUMED_ROWS, META_DATA_MODE, META_ENGINE_IDENTITY,
     META_FEATURE_SCHEMA, META_NEXT_EPISODE_SEQ, META_PRODUCED_ROWS, META_SCHEMA_VERSION,
-    SCHEMA_VERSION, decode_u32, decode_u64, decode_u64_key, encode_u32, encode_u64,
+    META_SYMMETRIC_REWARD_TARGET_SCALE, META_SYMMETRIC_REWARD_TIE_EPSILON, SCHEMA_VERSION,
+    decode_u32, decode_u64, decode_u64_key, encode_u32, encode_u64,
 };
-use crate::store::ReplayDataMode;
+use crate::store::{ReplayDataMode, SymmetricRewardTargetScale, SymmetricRewardTieEpsilon};
 use gz_engine::{ActionSetHash, EngineId, EngineIdentity, EngineVersion};
 use gz_features::FeatureSchemaConfig;
 use rocksdb::{
@@ -219,6 +220,46 @@ pub(crate) fn read_data_mode(db: &DB) -> ReplayResult<Option<ReplayDataMode>> {
     db.get_cf(&meta, META_DATA_MODE)?
         .map(|bytes| ReplayDataMode::from_bytes(&bytes).ok_or(ReplayError::DataModeMismatch))
         .transpose()
+}
+
+pub(crate) fn read_symmetric_reward_tie_epsilon(
+    db: &DB,
+) -> ReplayResult<Option<SymmetricRewardTieEpsilon>> {
+    let meta = cf(db, CF_META)?;
+    db.get_cf(&meta, META_SYMMETRIC_REWARD_TIE_EPSILON)?
+        .map(|bytes| {
+            let bytes: [u8; 4] = bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| ReplayError::storage("corrupt symmetric reward tie epsilon"))?;
+            SymmetricRewardTieEpsilon::new(f32::from_bits(u32::from_be_bytes(bytes)))
+                .ok_or_else(|| ReplayError::storage("corrupt symmetric reward tie epsilon"))
+        })
+        .transpose()
+}
+
+pub(crate) fn stored_symmetric_reward_tie_epsilon(epsilon: SymmetricRewardTieEpsilon) -> [u8; 4] {
+    epsilon.get().to_bits().to_be_bytes()
+}
+
+pub(crate) fn read_symmetric_reward_target_scale(
+    db: &DB,
+) -> ReplayResult<Option<SymmetricRewardTargetScale>> {
+    let meta = cf(db, CF_META)?;
+    db.get_cf(&meta, META_SYMMETRIC_REWARD_TARGET_SCALE)?
+        .map(|bytes| {
+            let bytes: [u8; 4] = bytes
+                .as_slice()
+                .try_into()
+                .map_err(|_| ReplayError::storage("corrupt symmetric reward target scale"))?;
+            SymmetricRewardTargetScale::new(f32::from_bits(u32::from_be_bytes(bytes)))
+                .ok_or_else(|| ReplayError::storage("corrupt symmetric reward target scale"))
+        })
+        .transpose()
+}
+
+pub(crate) fn stored_symmetric_reward_target_scale(scale: SymmetricRewardTargetScale) -> [u8; 4] {
+    scale.get().to_bits().to_be_bytes()
 }
 
 fn cf<'a>(db: &'a DB, name: &'static str) -> ReplayResult<&'a rocksdb::ColumnFamily> {

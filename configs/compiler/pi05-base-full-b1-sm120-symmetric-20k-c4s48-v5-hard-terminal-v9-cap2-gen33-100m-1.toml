@@ -1,0 +1,46 @@
+extends = "pi05-base-full-b1-sm120-symmetric-20k-c4s48-b8-v4.toml"
+
+[arch]
+dim = 512
+layers = 13
+heads = 16
+ffn_dim = 2048
+
+[trainer]
+total_steps = 20000
+batch = 1
+min_startup_rows = 256
+resume = true
+
+[selfplay]
+lanes = 8
+workers_per_lane = 4
+simulations = 48
+max_considered = 4
+max_steps = 15
+max_candidates = 256
+max_batch = 1
+eval_processes = 1
+eval_max_resident_model_generations = 33
+admission_smoothing = true
+mask_stop = false
+symmetric_reward_tie_epsilon = 0.002
+symmetric_reward_target_scale = 0.0
+
+[engine]
+compiler_deployment = "configs/compiler/pi05-base-full-b1-sm120-performance-only-end-to-end-nvidia-v5.toml"
+compiler_max_nodes = 65536
+compiler_max_edges = 131072
+
+[measurement]
+listen = "0.0.0.0:50073"
+receipt_dir = "/opt/dlami/nvme/graphzero-measure-receipts/pi05-qwen-regime-hard-v9-cap2-gen33-100m-1"
+
+[wandb]
+run_name = "compiler-pi05-base-full-b1-sm120-s42-m5-l15-p32-100m-end-to-end-nvidia-v5-c4s48-b1-gen33-reuse8-aux-v8-v32-score-stop-hard-terminal-v9-cap2-20k-1"
+run_id = "mlpatio6"
+
+[paths]
+run_dir = "/opt/dlami/nvme/graphzero-runs/pi05-qwen-regime-hard-v9-cap2-gen33-100m-1"
+replay_dir = "/opt/dlami/nvme/graphzero-replay/pi05-qwen-regime-hard-v9-cap2-gen33-100m-1"
+sample_socket = "/tmp/gz-pi05-qwen-regime-hard-v9-cap2-gen33-100m-1.sock"

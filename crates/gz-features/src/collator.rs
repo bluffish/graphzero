@@ -53,15 +53,6 @@ impl FeatureCollator {
         for row in rows {
             row.validate(&self.schema)?;
         }
-        // v2 packs node indexes and kind tokens as u16 on the wire; the
-        // subject padding sentinel is 0xffff, so valid indexes must stay
-        // strictly below it.
-        if self.schema.config().max_nodes > u32::from(u16::MAX) {
-            return Err(FeatureError::InvalidEncoding(
-                "max_nodes exceeds u16 wire width",
-            ));
-        }
-
         let layout = BatchLayout::new(&self.schema, capacity);
         out.clear();
         out.resize(layout.total_len, 0);
@@ -85,15 +76,15 @@ impl FeatureCollator {
                 row.edges.len() as u32,
             );
             for (edge_index, edge) in row.edges.iter().copied().enumerate() {
-                write_u16_at(
+                write_u32_at(
                     out,
-                    layout.edge_src + (row_index * layout.e + edge_index) * 2,
-                    narrow_index(edge.src, "edge src")?,
+                    layout.edge_src + (row_index * layout.e + edge_index) * 4,
+                    edge.src,
                 );
-                write_u16_at(
+                write_u32_at(
                     out,
-                    layout.edge_dst + (row_index * layout.e + edge_index) * 2,
-                    narrow_index(edge.dst, "edge dst")?,
+                    layout.edge_dst + (row_index * layout.e + edge_index) * 4,
+                    edge.dst,
                 );
                 out[layout.edge_type + row_index * layout.e + edge_index] = edge.edge_type;
             }
@@ -119,12 +110,12 @@ impl FeatureCollator {
                         FeatureError::InvalidEncoding("action subject count exceeds u8 wire width")
                     })?;
                 for (subject_index, subject) in action.subjects.iter().copied().enumerate() {
-                    write_u16_at(
+                    write_u32_at(
                         out,
                         layout.action_subjects
                             + ((row_index * layout.a + action_index) * layout.s + subject_index)
-                                * 2,
-                        narrow_index(subject, "action subject")?,
+                                * 4,
+                        subject,
                     );
                 }
             }
@@ -163,15 +154,15 @@ impl FeatureCollator {
                     opponent.edges.len() as u32,
                 );
                 for (edge_index, edge) in opponent.edges.iter().copied().enumerate() {
-                    write_u16_at(
+                    write_u32_at(
                         out,
-                        layout.opponent_edge_src + (row_index * layout.e + edge_index) * 2,
-                        narrow_index(edge.src, "opponent edge src")?,
+                        layout.opponent_edge_src + (row_index * layout.e + edge_index) * 4,
+                        edge.src,
                     );
-                    write_u16_at(
+                    write_u32_at(
                         out,
-                        layout.opponent_edge_dst + (row_index * layout.e + edge_index) * 2,
-                        narrow_index(edge.dst, "opponent edge dst")?,
+                        layout.opponent_edge_dst + (row_index * layout.e + edge_index) * 4,
+                        edge.dst,
                     );
                     out[layout.opponent_edge_type + row_index * layout.e + edge_index] =
                         edge.edge_type;
@@ -392,15 +383,15 @@ impl FeatureBatchView {
             node_tokens: read_u16_vec(bytes, layout.node_tokens, layout.b * layout.n)?,
             node_attrs: read_bf16_vec(bytes, layout.node_attrs, layout.b * layout.n * layout.d)?,
             edge_count: read_u32_vec(bytes, layout.edge_count, layout.b)?,
-            edge_src: read_u16_widened_vec(bytes, layout.edge_src, layout.b * layout.e)?,
-            edge_dst: read_u16_widened_vec(bytes, layout.edge_dst, layout.b * layout.e)?,
+            edge_src: read_u32_vec(bytes, layout.edge_src, layout.b * layout.e)?,
+            edge_dst: read_u32_vec(bytes, layout.edge_dst, layout.b * layout.e)?,
             edge_type: bytes[layout.edge_type..layout.edge_type + layout.b * layout.e].to_vec(),
             action_count: read_u32_vec(bytes, layout.action_count, layout.b)?,
             action_kind: read_u16_widened_vec(bytes, layout.action_kind, layout.b * layout.a)?,
             action_prior: read_bf16_vec(bytes, layout.action_prior, layout.b * layout.a)?,
             subject_count: bytes[layout.subject_count..layout.subject_count + layout.b * layout.a]
                 .to_vec(),
-            action_subjects: read_u16_widened_vec(
+            action_subjects: read_u32_vec(
                 bytes,
                 layout.action_subjects,
                 layout.b * layout.a * layout.s,
@@ -424,16 +415,8 @@ impl FeatureBatchView {
                 layout.b * layout.n * layout.d,
             )?,
             opponent_edge_count: read_u32_vec(bytes, layout.opponent_edge_count, layout.b)?,
-            opponent_edge_src: read_u16_widened_vec(
-                bytes,
-                layout.opponent_edge_src,
-                layout.b * layout.e,
-            )?,
-            opponent_edge_dst: read_u16_widened_vec(
-                bytes,
-                layout.opponent_edge_dst,
-                layout.b * layout.e,
-            )?,
+            opponent_edge_src: read_u32_vec(bytes, layout.opponent_edge_src, layout.b * layout.e)?,
+            opponent_edge_dst: read_u32_vec(bytes, layout.opponent_edge_dst, layout.b * layout.e)?,
             opponent_edge_type: bytes
                 [layout.opponent_edge_type..layout.opponent_edge_type + layout.b * layout.e]
                 .to_vec(),
@@ -540,14 +523,14 @@ impl BatchLayout {
         let node_tokens = section(&mut cursor, b * n * 2);
         let node_attrs = section(&mut cursor, b * n * d * 2);
         let edge_count = section(&mut cursor, b * 4);
-        let edge_src = section(&mut cursor, b * e * 2);
-        let edge_dst = section(&mut cursor, b * e * 2);
+        let edge_src = section(&mut cursor, b * e * 4);
+        let edge_dst = section(&mut cursor, b * e * 4);
         let edge_type = section(&mut cursor, b * e);
         let action_count = section(&mut cursor, b * 4);
         let action_kind = section(&mut cursor, b * a * 2);
         let action_prior = section(&mut cursor, b * a * 2);
         let subject_count = section(&mut cursor, b * a);
-        let action_subjects = section(&mut cursor, b * a * s * 2);
+        let action_subjects = section(&mut cursor, b * a * s * 4);
         let position = section(&mut cursor, b * 4 * 2);
         let opponent_reward = section(&mut cursor, b * 2);
         let opponent_present = section(&mut cursor, b);
@@ -558,8 +541,8 @@ impl BatchLayout {
         let opponent_node_tokens = section(&mut cursor, b * n * 2);
         let opponent_node_attrs = section(&mut cursor, b * n * d * 2);
         let opponent_edge_count = section(&mut cursor, b * 4);
-        let opponent_edge_src = section(&mut cursor, b * e * 2);
-        let opponent_edge_dst = section(&mut cursor, b * e * 2);
+        let opponent_edge_src = section(&mut cursor, b * e * 4);
+        let opponent_edge_dst = section(&mut cursor, b * e * 4);
         let opponent_edge_type = section(&mut cursor, b * e);
         let opponent_position = section(&mut cursor, b * 4 * 2);
         let total_len = align4(cursor);
@@ -613,7 +596,7 @@ const fn align4(value: usize) -> usize {
 
 fn fill_subject_padding(out: &mut [u8], layout: &BatchLayout) {
     let start = layout.action_subjects;
-    let end = start + layout.b * layout.a * layout.s * 2;
+    let end = start + layout.b * layout.a * layout.s * 4;
     out[start..end].fill(0xff);
 }
 

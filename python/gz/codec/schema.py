@@ -171,7 +171,7 @@ def _validate_schema_config(config: FeatureSchemaConfig) -> None:
     _check_range("node_attr_dim", config.node_attr_dim, 0, 0xFFFF)
     _check_range("edge_type_count", config.edge_type_count, 0, 0xFF)
     _check_range("action_kind_vocab_size", config.action_kind_vocab_size, 3, 0x1_0000)
-    _check_range("max_nodes", config.max_nodes, 1, 0xFFFF)
+    _check_range("max_nodes", config.max_nodes, 1, 0xFFFF_FFFF)
     _check_range("max_edges", config.max_edges, 1, 0xFFFF_FFFF)
     _check_range("max_actions", config.max_actions, 1, 0xFFFF_FFFF)
     _check_range("max_subjects", config.max_subjects, 1, 0xFF)

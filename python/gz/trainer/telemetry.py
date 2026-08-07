@@ -28,6 +28,7 @@ class SelfplayStatsTracker:
         self.folded = None
         self.measure: dict[str, int] = {}
         self.admission: dict[str, int] = {}
+        self.actor_training_step: int | None = None
 
     def observe_eval(self, fields: dict[str, str]) -> None:
         if fields.get("role", "current") != "current":
@@ -75,6 +76,14 @@ class SelfplayStatsTracker:
         with self.lock:
             self.admission = parsed
 
+    def observe_checkpoint_swap(self, fields: dict[str, str]) -> None:
+        try:
+            training_step = int(fields["training_step"])
+        except (KeyError, ValueError):
+            return
+        with self.lock:
+            self.actor_training_step = training_step
+
     def step_fields(self) -> dict[str, object]:
         with self.lock:
             out: dict[str, object] = {}
@@ -119,6 +128,8 @@ class SelfplayStatsTracker:
                     self.admission["pressure_gain_milli"] / 1_000
                 )
                 out["admission_gap_ms"] = self.admission["gap_us"] / 1_000
+            if self.actor_training_step is not None:
+                out["actor_training_step"] = self.actor_training_step
             return out
 
 
@@ -141,6 +152,8 @@ def pump_selfplay_stderr(
             stats.observe_measure(parse_stat_fields(raw.decode("utf-8", "replace")))
         elif raw.startswith(b"event=admission_stats "):
             stats.observe_admission(parse_stat_fields(raw.decode("utf-8", "replace")))
+        elif raw.startswith(b"event=checkpoint_swapped "):
+            stats.observe_checkpoint_swap(parse_stat_fields(raw.decode("utf-8", "replace")))
 
 
 class MetricsWriter:
@@ -210,6 +223,11 @@ class PerfWindow:
 # experimental fields from silently flooding the human-facing dashboard.
 WANDB_KEYS = {
     "policy_loss": "train/policy_loss",
+    "policy_target_entropy": "train/policy_target_entropy",
+    "policy_kl": "train/policy_kl",
+    "policy_uniform_advantage": "train/policy_uniform_advantage",
+    "policy_logit_std": "train/policy_logit_std",
+    "policy_logit_abs_mean": "train/policy_logit_abs_mean",
     "soft_policy_loss": "train/soft_policy_loss",
     "soft_policy_kl": "train/soft_policy_kl",
     "soft_policy_target_entropy": "train/soft_policy_target_entropy",
@@ -220,6 +238,8 @@ WANDB_KEYS = {
     "terminal_score_loss": "train/terminal_score_loss",
     "terminal_score_mae": "train/terminal_score_mae_nodes",
     "terminal_score_bias": "train/terminal_score_bias_nodes",
+    "terminal_latency_mae_ms": "train/terminal_latency_mae_ms",
+    "terminal_latency_bias_ms": "train/terminal_latency_bias_ms",
     "loss": "train/loss",
     "grad_norm": "train/grad_norm",
     "grad_clip_scale": "train/grad_clip_scale",
@@ -298,6 +318,8 @@ WANDB_KEYS = {
     "admission_episode_work": "admission/evals_per_episode",
     "admission_pressure_gain": "admission/pressure_gain",
     "admission_gap_ms": "admission/gap_ms",
+    "actor_training_step": "lag/actor_training_step",
+    "actor_training_step_lag": "lag/actor_training_step_lag",
     "terminal_cost_ema": "selfplay/terminal_cost_ema",
     "terminal_cost_best": "selfplay/terminal_cost_best",
     "stop_rate": "selfplay/stop_rate",
@@ -358,6 +380,7 @@ class WandbRun:
                 "trainer": asdict(config.trainer),
                 "selfplay": asdict(config.selfplay),
                 "measurement": asdict(config.measurement),
+                "engine": asdict(config.engine),
                 "arch": asdict(config.arch),
                 "run_dir": str(config.paths.run_dir),
             }

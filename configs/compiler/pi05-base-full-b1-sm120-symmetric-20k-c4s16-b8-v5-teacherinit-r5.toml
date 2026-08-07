@@ -1,0 +1,29 @@
+extends = "pi05-base-full-b1-sm120-symmetric-20k-c4s48-b8-v4.toml"
+
+[trainer]
+min_startup_rows = 480
+init_checkpoint = "/opt/dlami/nvme/graphzero-runs/pi05-v5-measured-trajectory-policy-distill-15-2k-r1/checkpoints"
+init_checkpoint_scope = "policy"
+
+[selfplay]
+simulations = 16
+max_considered = 4
+max_steps = 15
+max_candidates = 256
+max_batch = 8
+eval_processes = 1
+
+[engine]
+compiler_deployment = "configs/compiler/pi05-base-full-b1-sm120-performance-only-end-to-end-nvidia-v5.toml"
+
+[measurement]
+listen = "0.0.0.0:50069"
+receipt_dir = "/opt/dlami/nvme/graphzero-measure-receipts/pi05-base-full-b1-symmetric-20k-l15-c4s16-b8-compact-provider-v5-teacherinit-r5"
+
+[wandb]
+run_name = "compiler-pi05-base-full-b1-sm120-s42-m5-l15-w16-1m-end-to-end-nvidia-v5-c4s16-b8-teacherinit500-reuse8-aux-v8-v32-score-nostop-eps2us-20k-5"
+
+[paths]
+run_dir = "/opt/dlami/nvme/graphzero-runs/pi05-base-full-b1-symmetric-20k-l15-c4s16-b8-compact-provider-v5-teacherinit-r5"
+replay_dir = "/opt/dlami/nvme/graphzero-replay/pi05-base-full-b1-symmetric-20k-l15-c4s16-b8-compact-provider-v5-teacherinit-r5"
+sample_socket = "/tmp/gz-pi05-base-full-b1-symmetric-20k-l15-c4s16-b8-compact-provider-v5-teacherinit-r5.sock"

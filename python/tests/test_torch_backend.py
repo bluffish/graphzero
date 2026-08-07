@@ -106,6 +106,22 @@ def test_backend_resident_cap_defers_third_checkpoint_until_release(tmp_path: Pa
     assert backend.model_generation()[1] == third.model_version
 
 
+def test_larger_resident_cap_adopts_third_leased_checkpoint(tmp_path: Path) -> None:
+    view = fixture_view()
+    first = publish_random_checkpoint(tmp_path, view, seed=11)
+    backend = make_backend(tmp_path, max_resident_model_generations=3)
+    backend.handshake(make_hello(view, first.feature_schema_hash))
+
+    publish_random_checkpoint(tmp_path, view, seed=12)
+    backend._poll_once()
+    backend.apply_pending_swap()
+    third = publish_random_checkpoint(tmp_path, view, seed=13)
+    backend._poll_once()
+    backend.apply_pending_swap()
+
+    assert backend.model_generation()[1] == third.model_version
+
+
 def test_backend_rejects_incompatible_latest_and_keeps_serving(
     tmp_path: Path,
     capfd: pytest.CaptureFixture[str],
@@ -195,11 +211,12 @@ def fixture_view() -> BatchView:
     return BatchView.parse((FIXTURES / "batch_expander.gzfb").read_bytes())
 
 
-def make_backend(root: Path) -> TorchBackend:
+def make_backend(root: Path, max_resident_model_generations: int = 2) -> TorchBackend:
     return TorchBackend(
         DirectorySource(root),
         device="cpu",
         compile_model=False,
+        max_resident_model_generations=max_resident_model_generations,
         poll_interval=0.0,
     )
 

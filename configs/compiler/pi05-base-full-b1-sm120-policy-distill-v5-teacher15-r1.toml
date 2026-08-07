@@ -1,0 +1,37 @@
+extends = "pi05-base-full-b1-sm120-symmetric-20k-c4s48-b8-v4.toml"
+
+[trainer]
+total_steps = 2000
+lr = 0.0003
+adamw_lr = 0.0003
+lr_schedule = "constant"
+warmup_steps = 0
+batch = 4
+value_batch = 0
+window_rows = 15
+value_window_rows = 0
+publish_interval = 250
+permanent_checkpoint_interval = 250
+value_weight = 0.0
+max_reuse = 0.0
+reuse_gate_interval = 1
+reuse_gate_episodes = 0
+resume = false
+init_checkpoint = ""
+
+[distill]
+states = 15
+workers = 1
+max_attempts = 15
+teacher = "measured-trajectory"
+seed = 42
+max_steps = 15
+position_features = true
+
+[wandb]
+run_name = "compiler-pi05-base-full-b1-sm120-1m-v5-measured-trajectory-policy-distill-15-2k-1"
+
+[paths]
+run_dir = "/opt/dlami/nvme/graphzero-runs/pi05-v5-measured-trajectory-policy-distill-15-2k-r1"
+replay_dir = "/opt/dlami/nvme/graphzero-replay/pi05-v5-measured-trajectory-teacher-15-r1"
+sample_socket = "/tmp/gz-pi05-v5-measured-trajectory-policy-distill-15-r1.sock"

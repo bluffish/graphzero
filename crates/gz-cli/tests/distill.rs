@@ -83,7 +83,7 @@ fn generated_dataset_contains_unique_measured_policy_only_rows() {
         let selected = row
             .legal_actions
             .iter()
-            .position(|action| *action == row.selected_action)
+            .position(|action| Some(*action) == row.selected_action)
             .unwrap();
         assert!(row.policy_target[selected] > 0.0);
     }

@@ -2,6 +2,14 @@
 
 //! Whittle backend used to validate the distributed measurement transport.
 
+mod compiler;
+
+pub use compiler::{
+    COMPILER_MEASURE_CONFIG_ENCODING, CompilerBackend, CompilerDeployment,
+    compiler_measure_submission, compiler_measure_submission_pair, decode_compiler_measure_options,
+    encode_compiler_measure_options,
+};
+
 use gz_engine::{EngineIdentity, GraphEngine, MeasureConfigHash, MeasureOptions};
 use gz_engine_whittle::{WhittleEngine, WhittleEngineConfig, WhittleRoot};
 use gz_measure_service::{
@@ -40,18 +48,8 @@ impl AgentBackend for WhittleBackend {
     fn measure(
         &self,
         lease: &wire::MeasureLease,
-        mut subjects: Vec<FetchedSubject>,
+        subjects: Vec<FetchedSubject>,
     ) -> Result<AgentMeasurement, AgentBackendError> {
-        if subjects.len() != 1 {
-            return Err(backend_error(1, "Whittle requires exactly one subject"));
-        }
-        let subject = subjects.pop().unwrap();
-        if subject.logical_index != 0
-            || subject.format_kind != wire::GraphArtifactFormatKind::GraphArtifactFormatBinary
-            || subject.adapter_format_id != 0
-        {
-            return Err(backend_error(2, "unsupported Whittle subject format"));
-        }
         if lease.measure_config_encoding != WHITTLE_MEASURE_CONFIG_ENCODING {
             return Err(backend_error(3, "unsupported Whittle measure config"));
         }
@@ -64,47 +62,59 @@ impl AgentBackend for WhittleBackend {
         );
         let options = decode_measure_options(config_hash, &lease.measure_config_payload)
             .map_err(|error| backend_error(5, error.to_string()))?;
-        let mut engine = WhittleEngine::new(WhittleEngineConfig {
-            root: WhittleRoot::Artifact(subject.bytes),
-            ..WhittleEngineConfig::default()
-        })
-        .map_err(|error| backend_error(6, error.to_string()))?;
-        if engine_identity_to_wire(EngineIdentity::from_engine(&engine))
-            != lease.engine.clone().unwrap_or_default()
-        {
-            return Err(backend_error(7, "Whittle engine identity mismatch"));
-        }
-        if engine.measure_config_hash() != config_hash {
-            return Err(backend_error(8, "Whittle measure config hash mismatch"));
-        }
-        let root = engine.root();
-        if engine
-            .hash(root)
-            .map_err(|error| backend_error(9, error.to_string()))?
-            .as_bytes()
-            != &subject.graph_hash
-        {
-            return Err(backend_error(10, "Whittle artifact graph hash mismatch"));
-        }
-        let result = engine
-            .measure(root, options)
-            .map_err(|error| backend_error(11, error.to_string()))?;
-        let scalar_reward = result
-            .scalar_reward
-            .ok_or_else(|| backend_error(12, "Whittle omitted scalar reward"))?;
-        if !result.measured || !result.valid || !scalar_reward.is_finite() {
-            return Err(backend_error(13, "Whittle returned an invalid measurement"));
+        if subjects.len() != lease.subjects.len() {
+            return Err(backend_error(1, "Whittle subject count mismatch"));
         }
 
-        Ok(AgentMeasurement {
-            subjects: vec![wire::SubjectMeasurement {
-                logical_index: 0,
+        let mut measurements = Vec::with_capacity(subjects.len());
+        for subject in subjects {
+            if subject.format_kind != wire::GraphArtifactFormatKind::GraphArtifactFormatBinary
+                || subject.adapter_format_id != 0
+            {
+                return Err(backend_error(2, "unsupported Whittle subject format"));
+            }
+            let mut engine = WhittleEngine::new(WhittleEngineConfig {
+                root: WhittleRoot::Artifact(subject.bytes),
+                ..WhittleEngineConfig::default()
+            })
+            .map_err(|error| backend_error(6, error.to_string()))?;
+            if engine_identity_to_wire(EngineIdentity::from_engine(&engine))
+                != lease.engine.clone().unwrap_or_default()
+            {
+                return Err(backend_error(7, "Whittle engine identity mismatch"));
+            }
+            if engine.measure_config_hash() != config_hash {
+                return Err(backend_error(8, "Whittle measure config hash mismatch"));
+            }
+            let root = engine.root();
+            if engine
+                .hash(root)
+                .map_err(|error| backend_error(9, error.to_string()))?
+                .as_bytes()
+                != &subject.graph_hash
+            {
+                return Err(backend_error(10, "Whittle artifact graph hash mismatch"));
+            }
+            let result = engine
+                .measure(root, options)
+                .map_err(|error| backend_error(11, error.to_string()))?;
+            let scalar_reward = result
+                .scalar_reward
+                .ok_or_else(|| backend_error(12, "Whittle omitted scalar reward"))?;
+            if !result.measured || !result.valid || !scalar_reward.is_finite() {
+                return Err(backend_error(13, "Whittle returned an invalid measurement"));
+            }
+            measurements.push(wire::SubjectMeasurement {
+                logical_index: subject.logical_index,
                 graph_hash: result.graph_hash.as_bytes().to_vec(),
                 compile_elapsed_ns: None,
                 capture_elapsed_ns: None,
                 scalar_reward: Some(f64::from(scalar_reward)),
                 engine_metadata: result.metadata.bytes,
-            }],
+            });
+        }
+        Ok(AgentMeasurement {
+            subjects: measurements,
             samples: Vec::new(),
             telemetry: Vec::new(),
         })

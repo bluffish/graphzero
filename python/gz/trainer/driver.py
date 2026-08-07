@@ -5,7 +5,12 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from gz.checkpoints import CheckpointManifest, DirectorySource, ResolvedCheckpoint
-from gz.model.exphormer import ArchConfig, build_model, initialize_policy
+from gz.model.exphormer import (
+    ArchConfig,
+    build_model,
+    initialize_policy,
+    initialize_value,
+)
 from gz.trainer.checkpointing import (
     checkpoint_due as _checkpoint_due,
     load_initial_checkpoint as _load_initial_checkpoint,
@@ -125,6 +130,8 @@ def _prepare_run(
         )
         _seed_model(model_seed)
         model = build_model(sampler.feature_schema, config.arch)
+        initialize_policy(model, config.trainer.policy_init)
+        initialize_value(model, config.trainer.value_init)
         if config.trainer.init_checkpoint:
             resolved = _load_initial_checkpoint(
                 model,
@@ -145,8 +152,6 @@ def _prepare_run(
                     "scope": config.trainer.init_checkpoint_scope,
                 }
             )
-        else:
-            initialize_policy(model, config.trainer.policy_init)
         model = model.to(config.trainer.device)
         ema = EmaWeights(model, config.trainer.ema_decay)
         manifest = publish_ema(
@@ -228,19 +233,23 @@ class _TrainingSession:
         self.window = PerfWindow(0, 0)
 
         schema = self.sampler.feature_schema
-        validate_score = config.trainer.terminal_score_weight > 0.0
+        score_target = (
+            config.trainer.terminal_score_target
+            if config.trainer.terminal_score_weight > 0.0
+            else None
+        )
         self.policy_stager = TrainingStager(
             schema,
             self.sampler.max_batch,
             config.trainer.device,
-            validate_terminal_score=validate_score,
+            terminal_score_target=score_target,
         )
         self.value_stager = (
             TrainingStager(
                 schema,
                 self.sampler.max_batch,
                 config.trainer.device,
-                validate_terminal_score=validate_score,
+                terminal_score_target=score_target,
             )
             if config.trainer.value_batch > 0
             else None
@@ -301,11 +310,21 @@ class _TrainingSession:
                 "event": "value_tasks",
                 "auxiliary_heads": self.config.arch.auxiliary_heads,
                 "horizons": [8, 32],
-                "score_scale": self.sampler.feature_schema.max_nodes,
+                "score_scale": (
+                    self.sampler.feature_schema.max_nodes
+                    if trainer.terminal_score_target == "node-count"
+                    else None
+                ),
+                "terminal_score_unit": (
+                    "nodes"
+                    if trainer.terminal_score_target == "node-count"
+                    else "milliseconds"
+                ),
                 "value_final_weight": trainer.value_final_weight,
                 "value_v8_weight": trainer.value_v8_weight,
                 "value_v32_weight": trainer.value_v32_weight,
                 "terminal_score_weight": trainer.terminal_score_weight,
+                "terminal_score_target": trainer.terminal_score_target,
                 "soft_policy_weight": trainer.soft_policy_weight,
                 "soft_policy_temperature": trainer.soft_policy_temperature,
                 "soft_policy_trunk_grad_scale": trainer.soft_policy_trunk_grad_scale,
@@ -322,6 +341,7 @@ class _TrainingSession:
             trainer.window_rows,
             trainer.value_batch,
             trainer.value_window_rows or trainer.window_rows,
+            trainer.value_terminal_fraction,
             self.data_seed,
             trainer.total_steps,
             trainer.max_reuse,
@@ -412,6 +432,7 @@ class _TrainingSession:
             policy_window_rows=trainer.window_rows,
             value_batch=trainer.value_batch,
             value_window_rows=trainer.value_window_rows or trainer.window_rows,
+            value_terminal_fraction=trainer.value_terminal_fraction,
             run_seed=self.data_seed,
             step=step,
             produced_rows=ack.produced_rows,
@@ -454,6 +475,11 @@ class _TrainingSession:
             "timestamp": time.time(),
             "step": step_metrics.step,
             "policy_loss": step_metrics.policy_loss,
+            "policy_target_entropy": step_metrics.policy_target_entropy,
+            "policy_kl": step_metrics.policy_kl,
+            "policy_uniform_advantage": step_metrics.policy_uniform_advantage,
+            "policy_logit_std": step_metrics.policy_logit_std,
+            "policy_logit_abs_mean": step_metrics.policy_logit_abs_mean,
             "soft_policy_loss": step_metrics.soft_policy_loss,
             "soft_policy_kl": step_metrics.soft_policy_kl,
             "soft_policy_target_entropy": step_metrics.soft_policy_target_entropy,
@@ -480,6 +506,10 @@ class _TrainingSession:
             **self.stage.stats.step_fields(),
         }
         record["value_accuracy"] = step_metrics.value_accuracy
+        if "actor_training_step" in record:
+            record["actor_training_step_lag"] = max(
+                step_metrics.step - int(record["actor_training_step"]), 0
+            )
         record["learner_win_rate"] = step_metrics.learner_win_rate
         if ack.learner_win_rate_ema >= 0.0:
             record["learner_win_rate_ema"] = ack.learner_win_rate_ema
@@ -492,6 +522,9 @@ class _TrainingSession:
         record.update(symmetric_step_fields(ack, episodes))
         record.update(self.window.drain(produced, episodes))
         record.update(step_metrics.logging_fields())
+        if trainer.terminal_score_target == "log1p-cost-ms":
+            record["terminal_latency_mae_ms"] = record.pop("terminal_score_mae")
+            record["terminal_latency_bias_ms"] = record.pop("terminal_score_bias")
         self.metrics.write(record)
 
     def _publish(self, training_step: int) -> None:

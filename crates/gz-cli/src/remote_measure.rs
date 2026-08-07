@@ -1,6 +1,7 @@
 use gz_measure_service::{
     CertificateFingerprint, Coordinator, CoordinatorConfig, CoordinatorHandle, CoordinatorServer,
-    CoordinatorTlsConfig, DeviceId, Enrollment, ReceiptLedgerConfig, certificate_fingerprint,
+    CoordinatorTlsConfig, DeviceId, Enrollment, MeasureSubmissionKind, ReceiptLedgerConfig,
+    certificate_fingerprint,
 };
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
@@ -68,9 +69,6 @@ impl RemoteMeasureConfig {
         if self.agents.is_empty() {
             return Err("remote measurement requires at least one --measure-agent".to_owned());
         }
-        if self.profile.as_deref().is_none_or(str::is_empty) {
-            return Err("remote measurement requires --measure-profile".to_owned());
-        }
         if self.receipt_dir.is_none() {
             return Err("remote measurement requires --measure-receipt-dir".to_owned());
         }
@@ -78,6 +76,11 @@ impl RemoteMeasureConfig {
             return Err("--measure-startup-timeout-ms must be greater than zero".to_owned());
         }
         Ok(())
+    }
+
+    #[must_use]
+    pub const fn enabled(&self) -> bool {
+        self.listen.is_some()
     }
 }
 
@@ -104,17 +107,25 @@ impl RemoteCoordinator {
                 return Err("duplicate remote agent certificate".to_owned());
             }
         }
+        let artifact_item_capacity = job_capacity
+            .checked_mul(MeasureSubmissionKind::SymmetricPair.subject_count())
+            .ok_or_else(|| "remote measurement artifact capacity overflow".to_owned())?;
+        let defaults = CoordinatorConfig::default();
+        let artifact_byte_capacity = artifact_item_capacity
+            .checked_mul(defaults.max_artifact_bytes)
+            .ok_or_else(|| "remote measurement artifact byte capacity overflow".to_owned())?;
         let coordinator = Coordinator::new(CoordinatorConfig {
             enrollment: Enrollment::MutualTls(enrolled),
             queue_capacity: job_capacity,
-            artifact_item_capacity: job_capacity,
+            artifact_item_capacity,
+            artifact_byte_capacity,
             receipt_ledger: ReceiptLedgerConfig::Directory {
                 path: config
                     .receipt_dir
                     .clone()
                     .expect("validated receipt directory"),
             },
-            ..CoordinatorConfig::default()
+            ..defaults
         })
         .map_err(|error| error.to_string())?;
         let handle = coordinator.handle();

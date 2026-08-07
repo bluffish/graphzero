@@ -10,8 +10,8 @@ fn job_identity_reuses_nonce_but_separates_logical_calls() {
     let engine = WhittleEngine::default();
     let graph = engine.root();
     let submission = submission(&engine, graph);
-    let descriptor = artifact_descriptor(&submission.artifact).unwrap();
-    let key = measurement_key(&submission, descriptor);
+    let descriptor = artifact_descriptor(&submission.subjects[0]).unwrap();
+    let key = measurement_key(&submission, &[descriptor]);
     let nonce = RequestNonce::from_bytes([7; 16]);
 
     assert_eq!(job_id(key, nonce), job_id(key, nonce));

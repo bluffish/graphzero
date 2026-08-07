@@ -1,4 +1,10 @@
-use gz_engine::{CandidateOptions, EngineIdentity, EngineResult, GraphEngine, ModelVersion};
+use gz_engine::{
+    CandidateOptions, EngineIdentity, EngineResult, GraphEngine, MeasureOptions, ModelVersion,
+};
+use gz_engine_compiler::{
+    CompilerEngine, CompilerFeatureExtractor, CompilerFeatureExtractorConfig,
+    CompilerFeatureLayout, CompilerStateId,
+};
 use gz_engine_whittle::{
     WhittleEngine, WhittleEngineConfig, WhittleFeatureExtractor, WhittleFeatureExtractorConfig,
     WhittleGraphGenerator, WhittleGraphGeneratorConfig, WhittleGraphId, WhittleRoot,
@@ -6,14 +12,20 @@ use gz_engine_whittle::{
 use gz_eval_service::{
     EvaluatorProcess, EvaluatorProcessConfig, Hello, STUB_MODEL_VERSION, StubBackend,
 };
-use gz_features::FeatureSchemaHash;
-use gz_measure_agent::{named_test_profile_hash, submission as whittle_measure_submission};
+use gz_features::{FeatureExtractor, FeatureSchemaHash};
+use gz_measure_agent::{
+    CompilerDeployment, compiler_measure_submission, named_test_profile_hash,
+    submission as whittle_measure_submission,
+};
 use gz_measurer::MeasureLedgerSnapshot;
 use gz_orchestrator::{
     AdmissionSmoothingConfig, FeaturizedRuntime, RemoteMeasurementRuntime, ReplayBackpressure,
     ReplayRuntime, RootSource, ThreadedGumbelOrchestrator, ThreadedOrchestratorConfig,
 };
-use gz_replay::{ReplayContract, ReplayCounters, ReplayDataMode, ReplayEpisodeId, ReplayStore};
+use gz_replay::{
+    ReplayContract, ReplayCounters, ReplayDataMode, ReplayEpisodeId, ReplayStore,
+    SymmetricRewardTargetScale, SymmetricRewardTieEpsilon,
+};
 use gz_search::{GumbelMcts, GumbelMctsConfig, GumbelValueMode};
 use std::num::{NonZeroU64, NonZeroUsize};
 use std::path::PathBuf;
@@ -24,9 +36,121 @@ use std::time::Duration;
 use crate::remote_measure::{RemoteCoordinator, RemoteMeasureConfig};
 
 const WHITTLE_FEATURE_MAX_ENGINE_CANDIDATES: usize = 255;
+const DEFAULT_MEASURE_SAMPLES: u32 = 1;
+
+#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+pub enum EngineKind {
+    #[default]
+    Whittle,
+    Compiler,
+}
+
+impl EngineKind {
+    pub const fn as_str(self) -> &'static str {
+        match self {
+            Self::Whittle => "whittle",
+            Self::Compiler => "compiler",
+        }
+    }
+}
+
+impl FromStr for EngineKind {
+    type Err = String;
+
+    fn from_str(value: &str) -> Result<Self, Self::Err> {
+        match value {
+            "whittle" => Ok(Self::Whittle),
+            "compiler" => Ok(Self::Compiler),
+            _ => Err(format!("unknown engine: {value}")),
+        }
+    }
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct SelfplayEngineConfig {
+    pub kind: EngineKind,
+    pub compiler_deployment: Option<PathBuf>,
+    pub compiler_max_nodes: Option<u32>,
+    pub compiler_max_edges: Option<u32>,
+    pub compiler_max_subjects: Option<u32>,
+    pub compiler_feature_layout: CompilerFeatureLayout,
+    pub measure_samples: u32,
+}
+
+impl Default for SelfplayEngineConfig {
+    fn default() -> Self {
+        Self {
+            kind: EngineKind::Whittle,
+            compiler_deployment: None,
+            compiler_max_nodes: None,
+            compiler_max_edges: None,
+            compiler_max_subjects: None,
+            compiler_feature_layout: CompilerFeatureLayout::ExpandedPorts,
+            measure_samples: DEFAULT_MEASURE_SAMPLES,
+        }
+    }
+}
+
+impl SelfplayEngineConfig {
+    fn validate(&self) -> Result<(), String> {
+        match self.kind {
+            EngineKind::Whittle => {
+                if self.compiler_deployment.is_some()
+                    || self.compiler_max_nodes.is_some()
+                    || self.compiler_max_edges.is_some()
+                    || self.compiler_max_subjects.is_some()
+                {
+                    return Err("compiler options require --engine compiler".to_owned());
+                }
+            }
+            EngineKind::Compiler => {
+                if self.compiler_deployment.is_none() {
+                    return Err("--engine compiler requires --compiler-deployment".to_owned());
+                }
+                for (value, flag) in [
+                    (self.compiler_max_nodes, "--compiler-max-nodes"),
+                    (self.compiler_max_edges, "--compiler-max-edges"),
+                    (self.compiler_max_subjects, "--compiler-max-subjects"),
+                ] {
+                    if value.is_none_or(|value| value == 0) {
+                        return Err(format!("--engine compiler requires positive {flag}"));
+                    }
+                }
+                if self.compiler_max_subjects > Some(u32::from(u8::MAX)) {
+                    return Err("--compiler-max-subjects exceeds u8 wire width".to_owned());
+                }
+            }
+        }
+        if self.measure_samples == 0 {
+            return Err("--measure-samples must be greater than zero".to_owned());
+        }
+        Ok(())
+    }
+
+    fn compiler_features(
+        &self,
+        max_actions: u32,
+    ) -> Result<CompilerFeatureExtractorConfig, String> {
+        self.validate()?;
+        Ok(CompilerFeatureExtractorConfig {
+            layout: self.compiler_feature_layout,
+            max_nodes: self
+                .compiler_max_nodes
+                .expect("validated compiler max_nodes"),
+            max_edges: self
+                .compiler_max_edges
+                .expect("validated compiler max_edges"),
+            max_actions,
+            max_subjects: self
+                .compiler_max_subjects
+                .expect("validated compiler max_subjects"),
+        })
+    }
+}
 
 #[derive(Clone, Debug)]
 pub struct SelfplayConfig {
+    pub engine: SelfplayEngineConfig,
     pub replay_dir: Option<PathBuf>,
     pub episodes: u64,
     pub lanes: usize,
@@ -48,6 +172,7 @@ pub struct SelfplayConfig {
     pub checkpoint_pointer: Option<String>,
     pub eval_device: Option<String>,
     pub eval_poll_interval: Option<f32>,
+    pub eval_max_resident_model_generations: usize,
     pub serve_socket: Option<PathBuf>,
     pub serve_max_batch: usize,
     pub replay_backlog: Option<u64>,
@@ -55,6 +180,8 @@ pub struct SelfplayConfig {
     pub position_features: bool,
     pub no_backtrack: bool,
     pub mask_stop: bool,
+    pub reward_tie_epsilon: SymmetricRewardTieEpsilon,
+    pub reward_target_scale: SymmetricRewardTargetScale,
     pub eval_processes: usize,
     pub admission_stagger_ms: u64,
     pub admission_smoothing: bool,
@@ -63,17 +190,23 @@ pub struct SelfplayConfig {
 
 #[derive(Clone, Debug)]
 pub struct ReplayInitConfig {
+    pub engine: SelfplayEngineConfig,
     pub replay_dir: Option<PathBuf>,
     pub max_candidates: usize,
     pub mask_stop: bool,
+    pub reward_tie_epsilon: SymmetricRewardTieEpsilon,
+    pub reward_target_scale: SymmetricRewardTargetScale,
 }
 
 impl Default for ReplayInitConfig {
     fn default() -> Self {
         Self {
+            engine: SelfplayEngineConfig::default(),
             replay_dir: None,
             max_candidates: WHITTLE_FEATURE_MAX_ENGINE_CANDIDATES,
             mask_stop: false,
+            reward_tie_epsilon: SymmetricRewardTieEpsilon::ZERO,
+            reward_target_scale: SymmetricRewardTargetScale::HARD,
         }
     }
 }
@@ -86,7 +219,15 @@ impl ReplayInitConfig {
         if self.max_candidates == 0 {
             return Err("--max-candidates must be greater than zero".to_owned());
         }
+        if self.reward_target_scale.is_graded()
+            && self.reward_tie_epsilon != SymmetricRewardTieEpsilon::ZERO
+        {
+            return Err(
+                "graded symmetric targets require --symmetric-reward-tie-epsilon 0".to_owned(),
+            );
+        }
         feature_max_actions(self.max_candidates)?;
+        self.engine.validate()?;
         Ok(())
     }
 }
@@ -100,6 +241,7 @@ pub struct ReplayInitSummary {
 impl Default for SelfplayConfig {
     fn default() -> Self {
         Self {
+            engine: SelfplayEngineConfig::default(),
             replay_dir: None,
             episodes: 16,
             lanes: 2,
@@ -121,6 +263,7 @@ impl Default for SelfplayConfig {
             checkpoint_pointer: None,
             eval_device: None,
             eval_poll_interval: None,
+            eval_max_resident_model_generations: 2,
             serve_socket: None,
             serve_max_batch: 512,
             replay_backlog: None,
@@ -128,6 +271,8 @@ impl Default for SelfplayConfig {
             position_features: true,
             no_backtrack: true,
             mask_stop: false,
+            reward_tie_epsilon: SymmetricRewardTieEpsilon::ZERO,
+            reward_target_scale: SymmetricRewardTargetScale::HARD,
             eval_processes: 1,
             admission_stagger_ms: 0,
             admission_smoothing: false,
@@ -174,6 +319,13 @@ impl SelfplayConfig {
                 "STOP-enabled symmetric selfplay requires --position-features true".to_owned(),
             );
         }
+        if self.reward_target_scale.is_graded()
+            && self.reward_tie_epsilon != SymmetricRewardTieEpsilon::ZERO
+        {
+            return Err(
+                "graded symmetric targets require --symmetric-reward-tie-epsilon 0".to_owned(),
+            );
+        }
         if self.evaluator == EvaluatorMode::Torch && self.checkpoint_dir.is_none() {
             return Err("--evaluator torch requires --checkpoint-dir".to_owned());
         }
@@ -196,6 +348,9 @@ impl SelfplayConfig {
         {
             return Err("--eval-poll-interval must be zero (disabled) or positive".to_owned());
         }
+        if self.eval_max_resident_model_generations < 2 {
+            return Err("--eval-max-resident-model-generations must be at least two".to_owned());
+        }
         if let Some(pointer) = &self.checkpoint_pointer
             && (pointer.is_empty()
                 || PathBuf::from(pointer)
@@ -213,6 +368,17 @@ impl SelfplayConfig {
         }
         if self.eval_processes > self.lanes {
             return Err("--eval-processes cannot exceed --lanes".to_owned());
+        }
+        if let Some(devices) = self.eval_device.as_deref() {
+            let devices = devices.split(',').map(str::trim).collect::<Vec<_>>();
+            if devices.iter().any(|device| device.is_empty())
+                || (devices.len() != 1 && devices.len() != self.eval_processes)
+            {
+                return Err(
+                    "--eval-device requires one device or one comma-separated device per evaluator process"
+                        .to_owned(),
+                );
+            }
         }
         if self.eval_processes > 1
             && !matches!(
@@ -237,11 +403,31 @@ impl SelfplayConfig {
         if self.replay_retain == Some(0) {
             return Err("--replay-retain must be greater than zero".to_owned());
         }
+        self.engine.validate()?;
         self.remote_measure.validate()?;
+        match self.engine.kind {
+            EngineKind::Whittle
+                if self.remote_measure.enabled()
+                    && self
+                        .remote_measure
+                        .profile
+                        .as_deref()
+                        .is_none_or(str::is_empty) =>
+            {
+                return Err("remote Whittle measurement requires --measure-profile".to_owned());
+            }
+            EngineKind::Compiler if !self.remote_measure.enabled() => {
+                return Err("--engine compiler requires remote measurement".to_owned());
+            }
+            EngineKind::Compiler if self.remote_measure.profile.is_some() => {
+                return Err("--measure-profile is Whittle-only".to_owned());
+            }
+            _ => {}
+        }
         Ok(())
     }
 
-    pub fn evaluator_extra_args(&self) -> Vec<String> {
+    pub fn evaluator_extra_args(&self, process_index: usize) -> Vec<String> {
         match self.evaluator {
             EvaluatorMode::Stub | EvaluatorMode::ProcessStub => Vec::new(),
             EvaluatorMode::Torch => {
@@ -249,7 +435,14 @@ impl SelfplayConfig {
                     .checkpoint_dir
                     .as_ref()
                     .expect("validated checkpoint_dir exists");
-                let device = self.eval_device.as_deref().unwrap_or("cuda:0");
+                let devices = self
+                    .eval_device
+                    .as_deref()
+                    .unwrap_or("cuda:0")
+                    .split(',')
+                    .map(str::trim)
+                    .collect::<Vec<_>>();
+                let device = devices.get(process_index).copied().unwrap_or(devices[0]);
                 let mut args = vec![
                     "--backend".to_owned(),
                     "torch".to_owned(),
@@ -266,6 +459,8 @@ impl SelfplayConfig {
                     args.push("--poll-interval".to_owned());
                     args.push(interval.to_string());
                 }
+                args.push("--max-resident-model-generations".to_owned());
+                args.push(self.eval_max_resident_model_generations.to_string());
                 args
             }
         }
@@ -328,26 +523,49 @@ pub fn init_replay(config: ReplayInitConfig) -> Result<ReplayInitSummary, String
         .expect("validated replay_dir exists");
     let max_actions = feature_max_actions(config.max_candidates)?;
     let store = ReplayStore::open(replay_dir).map_err(|error| error.to_string())?;
-    let engine = WhittleEngine::new(whittle_engine_config()).map_err(|error| error.to_string())?;
-    let extractor = WhittleFeatureExtractor::with_config(
-        &engine,
-        WhittleFeatureExtractorConfig {
-            max_actions,
-            ..WhittleFeatureExtractorConfig::default()
-        },
-    );
-    let schema = extractor.schema();
+    let (schema, schema_hash, identity) = match config.engine.kind {
+        EngineKind::Whittle => {
+            let engine =
+                WhittleEngine::new(whittle_engine_config()).map_err(|error| error.to_string())?;
+            let extractor = WhittleFeatureExtractor::with_config(
+                &engine,
+                WhittleFeatureExtractorConfig {
+                    max_actions,
+                    ..WhittleFeatureExtractorConfig::default()
+                },
+            );
+            (
+                extractor.schema().config().clone(),
+                extractor.schema().hash(),
+                EngineIdentity::from_engine(&engine),
+            )
+        }
+        EngineKind::Compiler => {
+            let deployment = load_compiler_deployment(&config.engine)?;
+            let engine = deployment.build_search_engine()?;
+            let extractor = CompilerFeatureExtractor::new(
+                &engine,
+                config.engine.compiler_features(max_actions)?,
+            )
+            .map_err(|error| error.to_string())?;
+            (
+                extractor.schema().config().clone(),
+                extractor.schema().hash(),
+                EngineIdentity::from_engine(&engine),
+            )
+        }
+    };
     store
-        .ensure_contract(&ReplayContract::featurized(
-            replay_data_mode(config.mask_stop),
-            schema.config().clone(),
-            EngineIdentity::from_engine(&engine),
-        ))
+        .ensure_contract(
+            &ReplayContract::featurized(replay_data_mode(config.mask_stop), schema, identity)
+                .with_symmetric_reward_tie_epsilon(config.reward_tie_epsilon)
+                .with_symmetric_reward_target_scale(config.reward_target_scale),
+        )
         .map_err(|error| error.to_string())?;
 
     Ok(ReplayInitSummary {
-        feature_schema_hash: schema.hash(),
-        max_actions: schema.config().max_actions,
+        feature_schema_hash: schema_hash,
+        max_actions,
     })
 }
 
@@ -362,48 +580,6 @@ pub fn run(config: SelfplayConfig) -> Result<SelfplaySummary, String> {
         ReplayStore::open_with_retention(replay_dir, config.replay_retain)
             .map_err(|error| error.to_string())?,
     );
-    let engines = (0..config.lanes)
-        .map(|_| WhittleEngine::new(whittle_engine_config()).map_err(|error| error.to_string()))
-        .collect::<Result<Vec<_>, _>>()?;
-    let search = search(&engines[0], &config)?;
-    let roots = root_sources(&config);
-    let schema = feature_extractor(&engines[0], &config)
-        .schema()
-        .config()
-        .clone();
-    store
-        .ensure_contract(&ReplayContract::featurized(
-            replay_data_mode(config.mask_stop),
-            schema,
-            EngineIdentity::from_engine(&engines[0]),
-        ))
-        .map_err(|error| error.to_string())?;
-
-    let job_capacity = config
-        .lanes
-        .checked_mul(config.workers_per_lane)
-        .ok_or_else(|| "remote measurement job capacity overflow".to_owned())?;
-    let mut remote_coordinator = RemoteCoordinator::start(&config.remote_measure, job_capacity)?;
-    if let Some(coordinator) = remote_coordinator.as_mut() {
-        coordinator.wait_for_agent(config.remote_measure.startup_timeout)?;
-    }
-    let remote_measurement = remote_coordinator.as_ref().map(|coordinator| {
-        let profile_hash = named_test_profile_hash(
-            config
-                .remote_measure
-                .profile
-                .as_deref()
-                .expect("validated remote measure profile"),
-        );
-        RemoteMeasurementRuntime::new(
-            coordinator.handle(),
-            Arc::new(
-                move |engine: &WhittleEngine, graph: WhittleGraphId, options| {
-                    whittle_measure_submission(engine, graph, options, profile_hash)
-                },
-            ),
-        )
-    });
 
     if let Some(socket) = config.serve_socket.clone() {
         let serve_store = Arc::clone(&store);
@@ -416,11 +592,178 @@ pub fn run(config: SelfplayConfig) -> Result<SelfplaySummary, String> {
         });
     }
 
+    match config.engine.kind {
+        EngineKind::Whittle => run_whittle(config, store),
+        EngineKind::Compiler => run_compiler(config, store),
+    }
+}
+
+fn run_whittle(config: SelfplayConfig, store: Arc<ReplayStore>) -> Result<SelfplaySummary, String> {
+    let engines = (0..config.lanes)
+        .map(|_| WhittleEngine::new(whittle_engine_config()).map_err(|error| error.to_string()))
+        .collect::<Result<Vec<_>, _>>()?;
+    let measure_options = MeasureOptions::new(
+        engines[0].measure_config_hash(),
+        config.engine.measure_samples,
+        None,
+        true,
+    )
+    .map_err(|error| error.to_string())?;
+    let search = search(measure_options, &config)?;
+    let roots = generated_root_sources(&config);
+    let extractors = engines
+        .iter()
+        .map(|engine| whittle_feature_extractor(engine, &config))
+        .collect::<Vec<_>>();
+    ensure_replay_contract(&store, &engines[0], extractors[0].schema(), &config)?;
+
+    let coordinator = start_remote_coordinator(&config)?;
+    let measurement = coordinator.as_ref().map(|coordinator| {
+        let profile_hash = named_test_profile_hash(
+            config
+                .remote_measure
+                .profile
+                .as_deref()
+                .expect("validated remote Whittle profile"),
+        );
+        RemoteMeasurementRuntime::new(
+            coordinator.handle(),
+            Arc::new(
+                move |engine: &WhittleEngine, graph: WhittleGraphId, options| {
+                    whittle_measure_submission(engine, graph, options, profile_hash)
+                },
+            ),
+        )
+    });
+    run_engine(
+        config,
+        store,
+        engines,
+        search,
+        roots,
+        extractors,
+        measurement,
+    )
+}
+
+fn run_compiler(
+    config: SelfplayConfig,
+    store: Arc<ReplayStore>,
+) -> Result<SelfplaySummary, String> {
+    let deployment = load_compiler_deployment(&config.engine)?;
+    let profile_hash = deployment.device_profile_hash();
+    let measure_options = deployment.measure_options(config.engine.measure_samples)?;
+    let engines = deployment.build_search_engines(config.lanes)?;
+    let search = search(measure_options, &config)?;
+    let roots = fixed_root_sources(&config);
+    let feature_config = config
+        .engine
+        .compiler_features(feature_max_actions(config.max_candidates)?)?;
+    let extractors = engines
+        .iter()
+        .map(|engine| CompilerFeatureExtractor::new(engine, feature_config))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| error.to_string())?;
+    ensure_replay_contract(&store, &engines[0], extractors[0].schema(), &config)?;
+
+    let coordinator = start_remote_coordinator(&config)?;
+    let coordinator = coordinator
+        .as_ref()
+        .expect("validated compiler remote measurement");
+    let measurement = RemoteMeasurementRuntime::new(
+        coordinator.handle(),
+        Arc::new(
+            move |engine: &CompilerEngine, graph: CompilerStateId, options| {
+                compiler_measure_submission(engine, graph, options, profile_hash)
+            },
+        ),
+    );
+    run_engine(
+        config,
+        store,
+        engines,
+        search,
+        roots,
+        extractors,
+        Some(measurement),
+    )
+}
+
+fn load_compiler_deployment(config: &SelfplayEngineConfig) -> Result<CompilerDeployment, String> {
+    CompilerDeployment::load(
+        config
+            .compiler_deployment
+            .as_ref()
+            .expect("validated compiler deployment"),
+    )
+}
+
+fn ensure_replay_contract<E: GraphEngine>(
+    store: &ReplayStore,
+    engine: &E,
+    schema: &gz_features::FeatureSchema,
+    config: &SelfplayConfig,
+) -> Result<(), String> {
+    store
+        .ensure_contract(
+            &ReplayContract::featurized(
+                replay_data_mode(config.mask_stop),
+                schema.config().clone(),
+                EngineIdentity::from_engine(engine),
+            )
+            .with_symmetric_reward_tie_epsilon(config.reward_tie_epsilon)
+            .with_symmetric_reward_target_scale(config.reward_target_scale),
+        )
+        .map_err(|error| error.to_string())
+}
+
+fn start_remote_coordinator(config: &SelfplayConfig) -> Result<Option<RemoteCoordinator>, String> {
+    let job_capacity = config
+        .lanes
+        .checked_mul(config.workers_per_lane)
+        .ok_or_else(|| "remote measurement job capacity overflow".to_owned())?;
+    let mut coordinator = RemoteCoordinator::start(&config.remote_measure, job_capacity)?;
+    if let Some(coordinator) = coordinator.as_mut() {
+        coordinator.wait_for_agent(config.remote_measure.startup_timeout)?;
+    }
+    Ok(coordinator)
+}
+
+fn run_engine<E, X, R>(
+    config: SelfplayConfig,
+    store: Arc<ReplayStore>,
+    engines: Vec<E>,
+    search: GumbelMcts,
+    roots: Vec<R>,
+    extractors: Vec<X>,
+    measurement: Option<RemoteMeasurementRuntime<E>>,
+) -> Result<SelfplaySummary, String>
+where
+    E: GraphEngine + Send + 'static,
+    E::Graph: Send,
+    E::Candidate: Send,
+    X: FeatureExtractor<E> + Send + 'static,
+    R: RootSource<E> + Send + 'static,
+{
     match config.evaluator {
-        EvaluatorMode::Stub => run_stub(config, store, engines, search, roots, remote_measurement),
-        EvaluatorMode::ProcessStub | EvaluatorMode::Torch => {
-            run_process(config, store, engines, search, roots, remote_measurement)
-        }
+        EvaluatorMode::Stub => run_stub(
+            config,
+            store,
+            engines,
+            search,
+            roots,
+            extractors,
+            measurement,
+        ),
+        EvaluatorMode::ProcessStub | EvaluatorMode::Torch => run_process(
+            config,
+            store,
+            engines,
+            search,
+            roots,
+            extractors,
+            measurement,
+        ),
     }
 }
 
@@ -432,18 +775,22 @@ const fn replay_data_mode(mask_stop: bool) -> ReplayDataMode {
     }
 }
 
-fn run_stub(
+fn run_stub<E, X, R>(
     config: SelfplayConfig,
     store: Arc<ReplayStore>,
-    engines: Vec<WhittleEngine>,
+    engines: Vec<E>,
     search: GumbelMcts,
-    roots: Vec<GeneratedRoots>,
-    measurement: Option<RemoteMeasurementRuntime<WhittleEngine>>,
-) -> Result<SelfplaySummary, String> {
-    let extractors = engines
-        .iter()
-        .map(|engine| feature_extractor(engine, &config))
-        .collect::<Vec<_>>();
+    roots: Vec<R>,
+    extractors: Vec<X>,
+    measurement: Option<RemoteMeasurementRuntime<E>>,
+) -> Result<SelfplaySummary, String>
+where
+    E: GraphEngine + Send + 'static,
+    E::Graph: Send,
+    E::Candidate: Send,
+    X: FeatureExtractor<E> + Send + 'static,
+    R: RootSource<E> + Send + 'static,
+{
     let orchestrator = ThreadedGumbelOrchestrator::new(engines, search, threaded_config(&config)?);
     let featurized = FeaturizedRuntime {
         extractors,
@@ -452,6 +799,8 @@ fn run_stub(
     let replay = ReplayRuntime {
         store: &store,
         backpressure: replay_backpressure(&config),
+        reward_tie_epsilon: config.reward_tie_epsilon,
+        reward_target_scale: config.reward_target_scale,
     };
     let run = match measurement {
         Some(measurement) => {
@@ -464,18 +813,22 @@ fn run_stub(
     summarize(&store, run, EvaluatorMode::Stub, Some(STUB_MODEL_VERSION))
 }
 
-fn run_process(
+fn run_process<E, X, R>(
     config: SelfplayConfig,
     store: Arc<ReplayStore>,
-    engines: Vec<WhittleEngine>,
+    engines: Vec<E>,
     search: GumbelMcts,
-    roots: Vec<GeneratedRoots>,
-    measurement: Option<RemoteMeasurementRuntime<WhittleEngine>>,
-) -> Result<SelfplaySummary, String> {
-    let extractors = engines
-        .iter()
-        .map(|engine| feature_extractor(engine, &config))
-        .collect::<Vec<_>>();
+    roots: Vec<R>,
+    extractors: Vec<X>,
+    measurement: Option<RemoteMeasurementRuntime<E>>,
+) -> Result<SelfplaySummary, String>
+where
+    E: GraphEngine + Send + 'static,
+    E::Graph: Send,
+    E::Candidate: Send,
+    X: FeatureExtractor<E> + Send + 'static,
+    R: RootSource<E> + Send + 'static,
+{
     let mut processes = Vec::with_capacity(config.eval_processes);
     for index in 0..config.eval_processes {
         processes.push(
@@ -487,7 +840,7 @@ fn run_process(
                 socket_path: process_socket_path(index),
                 ready_timeout: Duration::from_secs(10),
                 io_timeout: Duration::from_secs(300),
-                extra_args: config.evaluator_extra_args(),
+                extra_args: config.evaluator_extra_args(index),
                 ..EvaluatorProcessConfig::default()
             })
             .map_err(|error| error.to_string())?,
@@ -517,6 +870,8 @@ fn run_process(
     let replay = ReplayRuntime {
         store: &store,
         backpressure: replay_backpressure(&config),
+        reward_tie_epsilon: config.reward_tie_epsilon,
+        reward_target_scale: config.reward_target_scale,
     };
     let run = match measurement {
         Some(measurement) => {
@@ -577,6 +932,7 @@ fn threaded_config(config: &SelfplayConfig) -> Result<ThreadedOrchestratorConfig
         max_batch: nonzero(config.max_batch, "max_batch")?,
         admission_stagger: Duration::from_millis(config.admission_stagger_ms),
         admission_smoothing: admission_smoothing(config)?,
+        max_resident_model_generations: config.eval_max_resident_model_generations,
         flush_after: Duration::from_millis(3),
     })
 }
@@ -624,7 +980,7 @@ fn wait_for_process_exit(process: &mut EvaluatorProcess) -> Result<(), String> {
     }
 }
 
-fn search(engine: &WhittleEngine, config: &SelfplayConfig) -> Result<GumbelMcts, String> {
+fn search(measure_options: MeasureOptions, config: &SelfplayConfig) -> Result<GumbelMcts, String> {
     Ok(GumbelMcts::new(GumbelMctsConfig {
         max_steps: config.max_steps,
         simulations: nonzero(config.simulations, "simulations")?,
@@ -641,7 +997,7 @@ fn search(engine: &WhittleEngine, config: &SelfplayConfig) -> Result<GumbelMcts,
         no_backtrack: config.no_backtrack,
         value_mode: GumbelValueMode::SymmetricSelfplay,
         candidate_options: feature_candidate_options(config),
-        measure_options: engine.measure_options(),
+        measure_options,
     }))
 }
 
@@ -652,7 +1008,10 @@ fn feature_candidate_options(config: &SelfplayConfig) -> CandidateOptions {
     }
 }
 
-fn feature_extractor(engine: &WhittleEngine, config: &SelfplayConfig) -> WhittleFeatureExtractor {
+fn whittle_feature_extractor(
+    engine: &WhittleEngine,
+    config: &SelfplayConfig,
+) -> WhittleFeatureExtractor {
     WhittleFeatureExtractor::with_config(
         engine,
         WhittleFeatureExtractorConfig {
@@ -670,21 +1029,32 @@ fn feature_max_actions(max_candidates: usize) -> Result<u32, String> {
         .ok_or_else(|| "--max-candidates exceeds schema action limit".to_owned())
 }
 
-fn root_sources(config: &SelfplayConfig) -> Vec<GeneratedRoots> {
+fn generated_root_sources(config: &SelfplayConfig) -> Vec<GeneratedRoots> {
+    lane_episode_counts(config)
+        .into_iter()
+        .enumerate()
+        .map(|(lane, remaining)| GeneratedRoots {
+            remaining,
+            generator: WhittleGraphGenerator::from_seed(
+                whittle_generator_config(),
+                config.seed ^ ((lane as u64 + 1).wrapping_mul(0xd1b5_4a32_d192_ed03)),
+            ),
+        })
+        .collect()
+}
+
+fn fixed_root_sources(config: &SelfplayConfig) -> Vec<FixedRoots> {
+    lane_episode_counts(config)
+        .into_iter()
+        .map(|remaining| FixedRoots { remaining })
+        .collect()
+}
+
+fn lane_episode_counts(config: &SelfplayConfig) -> Vec<Option<u64>> {
     let base = config.episodes / config.lanes as u64;
     let extra = config.episodes % config.lanes as u64;
-
     (0..config.lanes)
-        .map(|lane| {
-            let count = base + u64::from((lane as u64) < extra);
-            GeneratedRoots {
-                remaining: (config.episodes != 0).then_some(count),
-                generator: WhittleGraphGenerator::from_seed(
-                    whittle_generator_config(),
-                    config.seed ^ ((lane as u64 + 1).wrapping_mul(0xd1b5_4a32_d192_ed03)),
-                ),
-            }
-        })
+        .map(|lane| (config.episodes != 0).then_some(base + u64::from((lane as u64) < extra)))
         .collect()
 }
 
@@ -735,6 +1105,21 @@ fn nonzero(value: usize, name: &str) -> Result<NonZeroUsize, String> {
 pub struct GeneratedRoots {
     remaining: Option<u64>,
     generator: WhittleGraphGenerator,
+}
+
+pub struct FixedRoots {
+    remaining: Option<u64>,
+}
+
+impl RootSource<CompilerEngine> for FixedRoots {
+    fn next_root(&mut self, engine: &mut CompilerEngine) -> EngineResult<Option<CompilerStateId>> {
+        match self.remaining.as_mut() {
+            Some(0) => return Ok(None),
+            Some(remaining) => *remaining -= 1,
+            None => {}
+        }
+        Ok(Some(engine.root()))
+    }
 }
 
 impl RootSource<WhittleEngine> for GeneratedRoots {

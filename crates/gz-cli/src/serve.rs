@@ -291,14 +291,17 @@ impl ReplaySampleSession {
     ) -> Result<(), (u32, &'static str)> {
         let request = SampleRequest::decode(payload, self.max_batch)?;
 
-        let rows = self
-            .store
-            .sample_rows(SampleConfig {
-                batch: request.batch,
-                window_rows: request.window_rows,
-                seed: request.seed,
-            })
-            .map_err(sample_error)?;
+        let sample = SampleConfig {
+            batch: request.batch,
+            window_rows: request.window_rows,
+            seed: request.seed,
+        };
+        let rows = if request.terminal_only {
+            self.store.sample_terminal_rows(sample)
+        } else {
+            self.store.sample_rows(sample)
+        }
+        .map_err(sample_error)?;
         let mut feature_rows = Vec::<FeatureRow>::with_capacity(rows.len());
         let mut targets = Vec::<RowTargets>::with_capacity(rows.len());
         let schema_hash = self.collator.schema().hash();

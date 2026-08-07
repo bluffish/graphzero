@@ -5,6 +5,7 @@ import queue
 import threading
 from concurrent.futures import Executor, ThreadPoolExecutor
 from dataclasses import dataclass
+from functools import partial
 
 from gz.trainer.sampler import SampleClient, step_seed
 
@@ -51,6 +52,7 @@ def sample_training_batches(
     policy_window_rows: int,
     value_batch: int,
     value_window_rows: int,
+    value_terminal_fraction: float,
     run_seed: int,
     step: int,
     produced_rows: int,
@@ -60,13 +62,19 @@ def sample_training_batches(
     if value_executor is not None and value_sampler is None:
         raise ValueError("parallel value sampling requires a separate sample client")
     value_future = None
+    terminal_value_batch = _select_terminal_value_batch(
+        run_seed, step, value_terminal_fraction
+    )
     if value_batch > 0 and value_executor is not None:
         assert value_sampler is not None
         value_future = value_executor.submit(
-            value_sampler.sample,
-            value_batch,
-            sample_window_rows(value_window_rows, produced_rows),
-            step_seed(run_seed, step, "value-sample"),
+            partial(
+                value_sampler.sample,
+                value_batch,
+                sample_window_rows(value_window_rows, produced_rows),
+                step_seed(run_seed, step, "value-sample"),
+                terminal_only=terminal_value_batch,
+            )
         )
     policy = sampler.sample(
         policy_batch,
@@ -82,8 +90,18 @@ def sample_training_batches(
                 value_batch,
                 sample_window_rows(value_window_rows, produced_rows),
                 step_seed(run_seed, step, "value-sample"),
+                terminal_only=terminal_value_batch,
             )
     return SampledBatches(policy=policy, value=value)
+
+
+def _select_terminal_value_batch(run_seed: int, step: int, fraction: float) -> bool:
+    if fraction <= 0.0:
+        return False
+    if fraction >= 1.0:
+        return True
+    draw = step_seed(run_seed, step, "value-terminal") / float(1 << 64)
+    return draw < fraction
 
 
 class SamplePrefetcher:
@@ -101,6 +119,7 @@ class SamplePrefetcher:
         window_rows: int,
         value_batch: int,
         value_window_rows: int,
+        value_terminal_fraction: float,
         seed: int,
         total_steps: int,
         max_reuse: float,
@@ -115,6 +134,7 @@ class SamplePrefetcher:
         self._window_rows = window_rows
         self._value_batch = value_batch
         self._value_window_rows = value_window_rows
+        self._value_terminal_fraction = value_terminal_fraction
         self._seed = seed
         self._total_steps = total_steps
         self._max_reuse = max_reuse
@@ -210,6 +230,7 @@ class SamplePrefetcher:
                             policy_window_rows=self._window_rows,
                             value_batch=self._value_batch,
                             value_window_rows=self._value_window_rows,
+                            value_terminal_fraction=self._value_terminal_fraction,
                             run_seed=self._seed,
                             step=step,
                             produced_rows=ack.produced_rows,

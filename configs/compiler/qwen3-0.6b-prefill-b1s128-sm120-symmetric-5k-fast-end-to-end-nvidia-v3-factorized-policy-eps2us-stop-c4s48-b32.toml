@@ -1,0 +1,18 @@
+extends = "qwen3-0.6b-prefill-b1s128-sm120-symmetric-5k-fast-end-to-end-nvidia-v3-centered-policy-eps2us-stop-c4s48-b32.toml"
+
+[arch]
+policy_head = "factorized-pointer"
+
+[engine]
+compiler_deployment = "configs/compiler/qwen3-0.6b-prefill-b1s128-sm120-performance-only-end-to-end-nvidia-v3-current-agent.toml"
+
+[measurement]
+receipt_dir = "/opt/dlami/nvme/graphzero-measure-receipts/qwen3-b1s128-sym-end-to-end-nvidia-v3-factorizedpi-w32-c4s48-b32-stop-eps2us-5k-7"
+
+[wandb]
+run_name = "compiler-qwen3-0p6b-prefill-b1s128-sm120-s42-m5-l24-w32-1m-end-to-end-nvidia-v3-reuse8-c4s48-b32-aux-v8-v32-score-stop-eps2us-fast-perfonly-factorizedpi-5k-7"
+
+[paths]
+run_dir = "/opt/dlami/nvme/graphzero-runs/qwen3-b1s128-sym-end-to-end-nvidia-v3-factorizedpi-w32-c4s48-b32-stop-eps2us-5k-7"
+replay_dir = "/opt/dlami/nvme/graphzero-replay/qwen3-b1s128-sym-end-to-end-nvidia-v3-factorizedpi-w32-c4s48-b32-stop-eps2us-5k-7"
+sample_socket = "/tmp/gz-qwen3-b1s128-sym-end-to-end-nvidia-v3-factorizedpi-w32-c4s48-b32-stop-eps2us-5k-7.sock"

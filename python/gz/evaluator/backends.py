@@ -16,7 +16,7 @@ from gz.proto import ERROR_CAPACITY, ERROR_PROTOCOL, ERROR_SCHEMA, Hello, Protoc
 
 WARMUP_RUNS = 3
 INITIAL_MODEL_GENERATION = 1
-MAX_RESIDENT_MODEL_GENERATIONS = 2
+DEFAULT_MAX_RESIDENT_MODEL_GENERATIONS = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,6 +197,7 @@ class TorchBackend:
         compile_model: bool = True,
         compile_mode: str = "reduce-overhead",
         max_batch: int = 1024,
+        max_resident_model_generations: int = DEFAULT_MAX_RESIDENT_MODEL_GENERATIONS,
         poll_interval: float = 10.0,
     ) -> None:
         torch = _torch()
@@ -205,6 +206,9 @@ class TorchBackend:
         self.compile_model = compile_model
         self.compile_mode = compile_mode
         self.max_batch = max_batch
+        if max_resident_model_generations < 2:
+            raise ValueError("max_resident_model_generations must be at least two")
+        self.max_resident_model_generations = max_resident_model_generations
         self.poll_interval = poll_interval
         self.resolved = self.source.resolve_latest()
         self._active = self._build_slot(self.resolved)
@@ -330,6 +334,7 @@ class TorchBackend:
         print(
             f"event=checkpoint_swapped model_version={pending.model_version.hex()}"
             f" generation={generation}"
+            f" training_step={pending.manifest.training_step}"
             f" warm_s={_time.perf_counter() - warm_started:.2f}"
             f" gpu_alloc_mb={allocated / 1e6:.0f}",
             file=sys.stderr,
@@ -519,7 +524,7 @@ class TorchBackend:
                 or version == pending_version
                 or version_key == self._loading_version
                 or version_key == self._adopting_version
-                or occupied >= MAX_RESIDENT_MODEL_GENERATIONS
+                or occupied >= self.max_resident_model_generations
             ):
                 return
             self._loading_version = version_key

@@ -35,6 +35,70 @@ def policy_ce_loss(
     return (per_row * weight).sum() / weight.sum().clamp(min=1.0)
 
 
+def policy_diagnostic_metrics(
+    logits: object,
+    policy: object,
+    action_count: object,
+    row_count: int,
+    *,
+    action_kind: object | None = None,
+    mask_stop: bool = False,
+) -> tuple[object, object, object, object, object]:
+    torch = _torch()
+    logits = logits.float()
+    policy = policy.float()
+    action_index = torch.arange(logits.shape[1], device=logits.device)
+    action_mask = action_index.unsqueeze(0) < action_count.unsqueeze(1)
+    if mask_stop:
+        if action_kind is None:
+            raise ValueError("mask_stop requires action_kind")
+        action_mask = action_mask & (action_kind != 1)
+    row_mask = _row_mask(torch, row_count, logits.shape[0], logits.device)
+    target = torch.where(
+        action_mask,
+        policy.clamp_min(0.0),
+        torch.zeros_like(policy),
+    )
+    target_mass = target.sum(dim=1, keepdim=True)
+    target = torch.where(
+        target_mass > 0.0,
+        target / target_mass.clamp_min(torch.finfo(target.dtype).tiny),
+        torch.zeros_like(target),
+    )
+    valid_actions = action_mask.sum(dim=1)
+    valid = row_mask & (target_mass.squeeze(1) > 0.0) & (valid_actions > 0)
+    weight = valid.to(logits.dtype)
+    denominator = weight.sum().clamp(min=1.0)
+
+    log_probs = torch.log_softmax(logits.masked_fill(~action_mask, -1.0e9), dim=-1)
+    target_entropy = -(
+        target * target.clamp_min(torch.finfo(target.dtype).tiny).log()
+    ).sum(dim=1)
+    cross_entropy = -(target * log_probs).sum(dim=1)
+    uniform_cross_entropy = valid_actions.clamp_min(1).float().log()
+
+    action_weight = action_mask.to(logits.dtype)
+    action_denominator = valid_actions.clamp_min(1).to(logits.dtype)
+    logit_mean = (logits * action_weight).sum(dim=1) / action_denominator
+    logit_variance = (
+        (logits - logit_mean.unsqueeze(1)).square() * action_weight
+    ).sum(dim=1) / action_denominator
+    logit_std = logit_variance.sqrt()
+    logit_abs_mean = (logits.abs() * action_weight).sum(dim=1) / action_denominator
+
+    def mean(value: object) -> object:
+        return (value * weight).sum() / denominator
+
+    entropy = mean(target_entropy)
+    return (
+        entropy,
+        (mean(cross_entropy) - entropy).clamp_min(0.0),
+        mean(uniform_cross_entropy - cross_entropy),
+        mean(logit_std),
+        mean(logit_abs_mean),
+    )
+
+
 def softened_policy_target(
     policy: object,
     action_count: object,
@@ -113,6 +177,26 @@ def value_mse_loss(value_raw: object, value: object, value_valid: object, row_co
     return (per_row * weight).sum() / weight.sum().clamp(min=1.0)
 
 
+def value_smooth_l1_loss(
+    value_raw: object,
+    value: object,
+    value_valid: object,
+    row_count: int,
+) -> object:
+    torch = _torch()
+    row_mask = _row_mask(torch, row_count, value_raw.shape[0], value_raw.device)
+    valid = row_mask & (value_valid > 0)
+    weight = valid.to(value_raw.dtype)
+    target = torch.where(valid, value, torch.zeros_like(value))
+    per_row = torch.nn.functional.smooth_l1_loss(
+        value_raw,
+        target,
+        reduction="none",
+        beta=1.0,
+    )
+    return (per_row * weight).sum() / weight.sum().clamp(min=1.0)
+
+
 def value_head_loss(
     value_raw: object,
     value: object,
@@ -149,14 +233,29 @@ def auxiliary_task_loss(
         batch.horizon_value_valid,
         batch.row_count,
     )
-    score_prediction = torch.sigmoid(score_raw)
-    score_target = -batch.reward / float(model.schema.max_nodes)
-    score_loss = value_mse_loss(
-        score_prediction,
-        score_target,
-        batch.horizon_value_valid,
-        batch.row_count,
-    )
+    terminal_cost = -batch.reward
+    if config.terminal_score_target == "node-count":
+        normalized_prediction = torch.sigmoid(score_raw)
+        normalized_target = terminal_cost / float(model.schema.max_nodes)
+        score_loss = value_mse_loss(
+            normalized_prediction,
+            normalized_target,
+            batch.horizon_value_valid,
+            batch.row_count,
+        )
+        score_prediction = normalized_prediction * float(model.schema.max_nodes)
+    elif config.terminal_score_target == "log1p-cost-ms":
+        log_prediction = torch.nn.functional.softplus(score_raw)
+        log_target = torch.log1p(terminal_cost.clamp_min(0.0))
+        score_loss = value_smooth_l1_loss(
+            log_prediction,
+            log_target,
+            batch.horizon_value_valid,
+            batch.row_count,
+        )
+        score_prediction = torch.expm1(log_prediction)
+    else:
+        raise ValueError(f"unknown terminal score target: {config.terminal_score_target}")
     weighted_losses = (
         (config.value_final_weight, final_loss),
         (config.value_v8_weight, v8_loss),
@@ -178,6 +277,8 @@ def _validate_task_weights(config: LoopConfig) -> None:
         raise ValueError("value task weights must be finite and non-negative")
     if not math.isclose(sum(weights), 1.0, rel_tol=0.0, abs_tol=1.0e-6):
         raise ValueError("value task weights must sum to one")
+    if config.terminal_score_target not in ("node-count", "log1p-cost-ms"):
+        raise ValueError(f"unknown terminal score target: {config.terminal_score_target}")
     if not math.isfinite(config.soft_policy_weight) or config.soft_policy_weight < 0.0:
         raise ValueError("soft-policy weight must be finite and non-negative")
     if (

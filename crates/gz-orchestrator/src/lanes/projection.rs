@@ -13,6 +13,8 @@ use std::sync::mpsc::{SyncSender, sync_channel};
 pub(super) struct SymmetricFeatureRows<C> {
     pub(super) p1: Vec<Vec<u8>>,
     pub(super) p2: Vec<Vec<u8>>,
+    pub(super) p1_terminal: Vec<u8>,
+    pub(super) p2_terminal: Vec<u8>,
     pub(super) candidates: Vec<C>,
 }
 
@@ -46,9 +48,13 @@ where
             true,
             &mut candidates,
         )?;
+        let (p1_terminal, p2_terminal) =
+            terminal_feature_rows(engine, extractor, search, &episode.p1, &episode.p2)?;
         Ok(SymmetricFeatureRows {
             p1,
             p2,
+            p1_terminal,
+            p2_terminal,
             candidates: std::mem::take(&mut candidates),
         })
     })();
@@ -59,6 +65,69 @@ where
             Err(error)
         }
     }
+}
+
+fn terminal_feature_rows<E, X>(
+    engine: &E,
+    extractor: &mut X,
+    search: &GumbelMcts,
+    p1: &SymmetricActorTrace<E::Graph, E::Candidate>,
+    p2: &SymmetricActorTrace<E::Graph, E::Candidate>,
+) -> EngineResult<(Vec<u8>, Vec<u8>)>
+where
+    E: GraphEngine,
+    X: FeatureExtractor<E>,
+{
+    let terminal_row = |extractor: &mut X,
+                        actor: &SymmetricActorTrace<E::Graph, E::Candidate>,
+                        opponent: &SymmetricActorTrace<E::Graph, E::Candidate>|
+     -> EngineResult<Vec<u8>> {
+        let (actor_step, actor_inactive) =
+            symmetric_position_state(actor, actor.steps.len(), false, search.config());
+        let mut position = replay_position_features(
+            episode_position_config(search),
+            extractor.schema(),
+            actor_step,
+        )?;
+        if actor_inactive {
+            position.budget_step = -position.budget_step.abs();
+        }
+        position.opponent_present = true;
+        let mut row = extractor
+            .extract(engine, actor.final_graph, &[], position)
+            .map_err(|_| internal("terminal feature extraction failed"))?;
+        row.actions.clear();
+
+        let (opponent_step, opponent_inactive) =
+            symmetric_position_state(opponent, opponent.steps.len(), false, search.config());
+        let mut opponent_position = replay_position_features(
+            episode_position_config(search),
+            extractor.schema(),
+            opponent_step,
+        )?;
+        if opponent_inactive {
+            opponent_position.budget_step = -opponent_position.budget_step.abs();
+        }
+        let opponent_row = extractor
+            .extract(engine, opponent.final_graph, &[], opponent_position)
+            .map_err(|_| internal("terminal opponent feature extraction failed"))?;
+        row.opponent = Some(OpponentStateFeatures {
+            node_count: opponent_row.node_count,
+            node_tokens: opponent_row.node_tokens,
+            node_attrs: opponent_row.node_attrs,
+            edges: opponent_row.edges,
+            position: opponent_row.position,
+        });
+        let mut bytes = Vec::new();
+        encode_feature_row(&row, extractor.schema(), &mut bytes)
+            .map_err(|_| internal("terminal feature row encoding failed"))?;
+        Ok(bytes)
+    };
+
+    Ok((
+        terminal_row(extractor, p1, p2)?,
+        terminal_row(extractor, p2, p1)?,
+    ))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -107,7 +176,10 @@ where
         position.opponent_present = true;
         let mut row = extractor
             .extract(engine, step.before, &candidates, position)
-            .map_err(|_| internal("feature extraction failed"))?;
+            .map_err(|error| {
+                eprintln!("event=feature_error role=actor step={index} error={error}");
+                internal("feature extraction failed")
+            })?;
 
         let requested_opponent_index = index + usize::from(opponent_after_turn);
         let opponent_index = requested_opponent_index.min(opponent.steps.len());
@@ -128,7 +200,12 @@ where
         }
         let opponent_row = extractor
             .extract(engine, opponent_graph, &[], opponent_position)
-            .map_err(|_| internal("opponent feature extraction failed"))?;
+            .map_err(|error| {
+                eprintln!(
+                    "event=feature_error role=opponent step={index} opponent_step={opponent_index} error={error}"
+                );
+                internal("opponent feature extraction failed")
+            })?;
         row.opponent = Some(OpponentStateFeatures {
             node_count: opponent_row.node_count,
             node_tokens: opponent_row.node_tokens,
@@ -224,14 +301,25 @@ pub(super) fn measured_symmetric_game<G: Copy, C: Copy>(
 ) -> MeasuredSymmetricGame {
     MeasuredSymmetricGame {
         lane,
-        p1_artifact: symmetric_artifact(&episode.p1, &rows.p1, episode.search_config_hash),
-        p2_artifact: symmetric_artifact(&episode.p2, &rows.p2, episode.search_config_hash),
+        p1_artifact: symmetric_artifact(
+            &episode.p1,
+            &rows.p1,
+            &rows.p1_terminal,
+            episode.search_config_hash,
+        ),
+        p2_artifact: symmetric_artifact(
+            &episode.p2,
+            &rows.p2,
+            &rows.p2_terminal,
+            episode.search_config_hash,
+        ),
     }
 }
 
 fn symmetric_artifact<G: Copy, C>(
     actor: &SymmetricActorTrace<G, C>,
     feature_rows: &[Vec<u8>],
+    terminal_feature_row: &[u8],
     search_config_hash: gz_engine::SearchConfigHash,
 ) -> CompletedEpisodeArtifact {
     CompletedEpisodeArtifact {
@@ -255,6 +343,7 @@ fn symmetric_artifact<G: Copy, C>(
             })
             .collect(),
         feature_rows: Some(feature_rows.to_vec()),
+        terminal_feature_row: Some(terminal_feature_row.to_vec()),
     }
 }
 

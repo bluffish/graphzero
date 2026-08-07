@@ -235,7 +235,6 @@ def finish_parameter_metrics(
 
 def auxiliary_signal_metrics(
     torch: object,
-    model: object,
     batch: TrainingBatch,
     score_prediction: object,
 ) -> AuxiliarySignalMetrics:
@@ -272,7 +271,7 @@ def auxiliary_signal_metrics(
     )
     score = _masked_pair_stats(
         torch,
-        score_prediction * float(model.schema.max_nodes),
+        score_prediction,
         -batch.reward,
         auxiliary_valid,
     )

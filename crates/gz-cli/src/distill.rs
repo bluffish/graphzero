@@ -8,7 +8,8 @@ use gz_engine_whittle::{
 };
 use gz_features::{FeatureExtractor, PositionFeatures, encode_feature_row};
 use gz_replay::{
-    ReplayContract, ReplayDataMode, ReplayEpisodeRecord, ReplayOutcome, ReplayRow, ReplayStore,
+    ReplayContract, ReplayDataMode, ReplayEpisodeRecord, ReplayOutcome, ReplayRow, ReplayRowKind,
+    ReplayStore,
 };
 use gz_search::reducing_uniform_distill_config_hash;
 use std::collections::HashSet;
@@ -501,13 +502,14 @@ fn build_example(
         row_count: 1,
     };
     let row = ReplayRow {
+        kind: ReplayRowKind::Decision,
         step_index: 0,
         root: root_context,
         state: root_context,
         action_history: Vec::new(),
         legal_actions,
         policy_target: label.policy_target,
-        selected_action,
+        selected_action: Some(selected_action),
         value_target: None,
         horizon_value_targets: None,
         reward_target: Some(reward),

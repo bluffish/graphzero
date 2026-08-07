@@ -7,7 +7,10 @@ use gz_measurer::{
     CompletedEpisodeArtifact, CompletedEpisodeStep, MeasuredSymmetricGame, MeasurerAdmissionStatus,
     MeasurerError, ReplayMeasurer, horizon_value_targets, project_episode,
 };
-use gz_replay::{ReplayContract, ReplayDataMode, ReplayEpisodeId, ReplayStore};
+use gz_replay::{
+    ReplayContract, ReplayDataMode, ReplayEpisodeId, ReplayRowKind, ReplayStore,
+    SymmetricRewardTargetScale, SymmetricRewardTieEpsilon,
+};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -42,7 +45,11 @@ fn symmetric_game_uses_reward_then_length_and_preserves_draws() {
     let dir = TestDir::new();
     let store = ReplayStore::open(dir.path()).unwrap();
     bind_store(&store, ReplayDataMode::SymmetricSelfplay);
-    let mut measurer = ReplayMeasurer::new(&store);
+    let mut measurer = ReplayMeasurer::new(
+        &store,
+        SymmetricRewardTieEpsilon::ZERO,
+        SymmetricRewardTargetScale::HARD,
+    );
 
     let admission = measurer
         .admit_symmetric(MeasuredSymmetricGame {
@@ -77,6 +84,62 @@ fn symmetric_game_uses_reward_then_length_and_preserves_draws() {
 }
 
 #[test]
+fn symmetric_game_uses_length_within_reward_tie_epsilon() {
+    let dir = TestDir::new();
+    let store = ReplayStore::open(dir.path()).unwrap();
+    let epsilon = SymmetricRewardTieEpsilon::new(0.01).unwrap();
+    store
+        .ensure_contract(
+            &ReplayContract::unfeaturized(
+                ReplayDataMode::SymmetricSelfplay,
+                EngineIdentity::from_context(context(0)),
+            )
+            .with_symmetric_reward_tie_epsilon(epsilon),
+        )
+        .unwrap();
+    let mut measurer = ReplayMeasurer::new(&store, epsilon, SymmetricRewardTargetScale::HARD);
+
+    measurer
+        .admit_symmetric(MeasuredSymmetricGame {
+            lane: 0,
+            p1_artifact: artifact(1, -4.0, 2, false, version(1)),
+            p2_artifact: artifact(2, -4.005, 1, false, version(2)),
+        })
+        .unwrap();
+    assert_eq!(target(&store, 0), -1.0);
+    assert_eq!(target(&store, 1), 1.0);
+}
+
+#[test]
+fn symmetric_game_uses_graded_reward_margin_targets() {
+    let dir = TestDir::new();
+    let store = ReplayStore::open(dir.path()).unwrap();
+    let scale = SymmetricRewardTargetScale::new(5.0).unwrap();
+    store
+        .ensure_contract(
+            &ReplayContract::unfeaturized(
+                ReplayDataMode::SymmetricSelfplay,
+                EngineIdentity::from_context(context(0)),
+            )
+            .with_symmetric_reward_target_scale(scale),
+        )
+        .unwrap();
+    let mut measurer = ReplayMeasurer::new(&store, SymmetricRewardTieEpsilon::ZERO, scale);
+
+    measurer
+        .admit_symmetric(MeasuredSymmetricGame {
+            lane: 0,
+            p1_artifact: artifact(1, -100.0, 1, false, version(1)),
+            p2_artifact: artifact(2, -105.0, 1, false, version(2)),
+        })
+        .unwrap();
+
+    let expected = 1.0_f32.tanh();
+    assert!((target(&store, 0) - expected).abs() < 1.0e-6);
+    assert!((target(&store, 1) + expected).abs() < 1.0e-6);
+}
+
+#[test]
 fn unmeasured_game_is_dropped_without_replay_rows() {
     let dir = TestDir::new();
     let store = ReplayStore::open(dir.path()).unwrap();
@@ -84,7 +147,11 @@ fn unmeasured_game_is_dropped_without_replay_rows() {
     let mut p1 = artifact(1, -4.0, 1, false, version(1));
     p1.final_measure.measured = false;
     p1.final_measure.scalar_reward = None;
-    let mut measurer = ReplayMeasurer::new(&store);
+    let mut measurer = ReplayMeasurer::new(
+        &store,
+        SymmetricRewardTieEpsilon::ZERO,
+        SymmetricRewardTargetScale::HARD,
+    );
 
     let admission = measurer
         .admit_symmetric(MeasuredSymmetricGame {
@@ -109,7 +176,11 @@ fn stop_is_not_counted_as_a_length_tiebreak_rewrite() {
     let dir = TestDir::new();
     let store = ReplayStore::open(dir.path()).unwrap();
     bind_store(&store, ReplayDataMode::SymmetricSelfplayStop);
-    let mut measurer = ReplayMeasurer::new(&store);
+    let mut measurer = ReplayMeasurer::new(
+        &store,
+        SymmetricRewardTieEpsilon::ZERO,
+        SymmetricRewardTargetScale::HARD,
+    );
     let mut p2 = artifact(2, -4.0, 2, false, version(2));
     add_stop_options(&mut p2);
 
@@ -156,6 +227,25 @@ fn horizon_targets_follow_v8_v32_recurrence() {
         horizon_value_targets(&artifact, 1.0),
         Err(MeasurerError::InvalidRootSearchValue)
     );
+}
+
+#[test]
+fn projection_appends_a_value_only_terminal_row() {
+    let mut artifact = artifact(7, -4.0, 2, false, version(1));
+    artifact.terminal_feature_row = Some(vec![9, 8, 7]);
+
+    let (record, rows) = project_episode(&artifact).unwrap();
+
+    assert_eq!(record.row_count, 3);
+    let terminal = rows.last().unwrap();
+    assert_eq!(terminal.kind, ReplayRowKind::Terminal);
+    assert_eq!(terminal.step_index, 2);
+    assert_eq!(terminal.state, artifact.final_graph);
+    assert_eq!(terminal.action_history.len(), 2);
+    assert!(terminal.legal_actions.is_empty());
+    assert!(terminal.policy_target.is_empty());
+    assert_eq!(terminal.selected_action, None);
+    assert_eq!(terminal.feature_row.as_deref(), Some([9, 8, 7].as_slice()));
 }
 
 #[test]
@@ -243,6 +333,7 @@ fn artifact(
         search_config_hash: SearchConfigHash::from_bytes([7; 32]),
         steps,
         feature_rows: None,
+        terminal_feature_row: None,
     }
 }
 

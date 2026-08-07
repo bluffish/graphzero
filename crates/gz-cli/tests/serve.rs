@@ -77,6 +77,7 @@ fn replay_serve_returns_symmetric_features_targets_and_metrics() {
 
     let mut sample = Vec::new();
     sample.extend_from_slice(&1u32.to_le_bytes());
+    sample.extend_from_slice(&0u32.to_le_bytes());
     sample.extend_from_slice(&summary.rows_produced.to_le_bytes());
     sample.extend_from_slice(&123u64.to_le_bytes());
     write_frame(&mut stream, 3, &[&sample]);
@@ -102,6 +103,7 @@ fn replay_serve_acks_an_initialized_empty_store() {
         replay_dir: Some(dir.path().to_path_buf()),
         max_candidates: 15,
         mask_stop: false,
+        ..ReplayInitConfig::default()
     })
     .unwrap();
     let socket = dir.path().join("empty.sock");

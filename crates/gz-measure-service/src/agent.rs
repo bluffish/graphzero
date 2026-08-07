@@ -7,6 +7,7 @@ use crate::{
 };
 use gz_engine::{GraphArtifact, GraphArtifactFormat};
 use prost::Message;
+use std::collections::HashMap;
 use std::fs::{File, OpenOptions};
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -171,6 +172,10 @@ impl AgentBackendError {
 pub trait AgentBackend: Send + Sync + 'static {
     fn capability(&self) -> wire::EngineCapability;
 
+    fn concurrent_job_slots(&self) -> u32 {
+        1
+    }
+
     fn measure(
         &self,
         lease: &wire::MeasureLease,
@@ -181,6 +186,7 @@ pub trait AgentBackend: Send + Sync + 'static {
 pub struct AgentRuntime<B> {
     config: AgentConfig,
     backend: Arc<B>,
+    job_slots: u32,
 }
 
 impl<B> AgentRuntime<B>
@@ -189,14 +195,30 @@ where
 {
     pub fn new(config: AgentConfig, backend: B) -> ServiceResult<Self> {
         config.validate()?;
+        let job_slots = backend.concurrent_job_slots();
+        if job_slots == 0 {
+            return Err(ServiceError::configuration(
+                "agent backend job slots must be greater than zero",
+            ));
+        }
+        if usize::try_from(job_slots)
+            .ok()
+            .is_none_or(|slots| slots > config.control_capacity)
+        {
+            return Err(ServiceError::configuration(
+                "agent backend job slots exceed the control queue capacity",
+            ));
+        }
         Ok(Self {
             config,
             backend: Arc::new(backend),
+            job_slots,
         })
     }
 
     pub async fn run_session(&self) -> ServiceResult<()> {
-        let persisted_reports = load_persisted_reports(&self.config).await?;
+        let job_slots = self.job_slots;
+        let persisted_reports = load_persisted_reports(&self.config, job_slots as usize).await?;
         let channel = connect_channel(&self.config).await?;
         let mut client = MeasureFleetClient::new(channel);
         let data_client = client.clone();
@@ -219,6 +241,7 @@ where
                             report_persisted: true,
                         })
                         .collect(),
+                    job_slots,
                 })),
             })
             .map_err(|_| ServiceError::capacity("agent control queue is full"))?;
@@ -248,65 +271,158 @@ where
             persisted_reports,
         )
         .await?;
-        send_ready(&event_tx, session_id, 1).await?;
+        send_ready(&event_tx, session_id, job_slots).await?;
         let heartbeat_interval = Duration::from_millis(welcome.heartbeat_interval_ms);
+        let config = Arc::new(self.config.clone());
+        let welcome = Arc::new(welcome);
+        let mut heartbeat = tokio::time::interval(heartbeat_interval);
+        heartbeat.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        heartbeat.tick().await;
+        let mut tasks = tokio::task::JoinSet::new();
+        let mut active = HashMap::<JobId, LeaseId>::with_capacity(job_slots as usize);
+        let mut draining = false;
 
         loop {
-            let command = tokio::select! {
-                command = commands.message() => command.map_err(status_error)?,
-                _ = tokio::time::sleep(heartbeat_interval) => {
-                    send_ready(&event_tx, session_id, 1).await?;
-                    continue;
-                }
-            };
-            let Some(command) = command else {
-                return Err(ServiceError::Closed);
-            };
-            match command.command {
-                Some(coordinator_command::Command::Lease(lease)) => {
-                    if let Err(error) = validate_lease(
-                        &self.config,
-                        &welcome,
-                        &self.backend.capability(),
-                        session_id,
-                        &lease,
-                    ) {
-                        reject_lease(&event_tx, session_id, &lease, error.to_string()).await?;
-                        continue;
+            tokio::select! {
+                command = commands.message() => {
+                    let Some(command) = command.map_err(status_error)? else {
+                        return Err(ServiceError::Closed);
+                    };
+                    match command.command {
+                        Some(coordinator_command::Command::Lease(lease)) => {
+                            let available = job_slots.saturating_sub(active.len() as u32);
+                            if draining || available == 0 {
+                                reject_lease(
+                                    &event_tx,
+                                    session_id,
+                                    &lease,
+                                    wire::JobRejectReason::JobRejectNotReady,
+                                    "agent has no free measurement slot".to_owned(),
+                                )
+                                .await?;
+                                send_ready(
+                                    &event_tx,
+                                    session_id,
+                                    if draining { 0 } else { available },
+                                )
+                                .await?;
+                                continue;
+                            }
+                            if let Err(error) = validate_lease(
+                                &config,
+                                &welcome,
+                                &self.backend.capability(),
+                                session_id,
+                                &lease,
+                            ) {
+                                reject_lease(
+                                    &event_tx,
+                                    session_id,
+                                    &lease,
+                                    wire::JobRejectReason::JobRejectUnsupportedConfig,
+                                    error.to_string(),
+                                )
+                                .await?;
+                                send_ready(&event_tx, session_id, available).await?;
+                                continue;
+                            }
+                            let job_id = JobId::from_slice(&lease.job_id)?;
+                            let lease_id = LeaseId::from_slice(&lease.lease_id)?;
+                            if active.insert(job_id, lease_id).is_some() {
+                                return Err(ServiceError::protocol(
+                                    "coordinator offered the same active job twice",
+                                ));
+                            }
+                            let task_config = Arc::clone(&config);
+                            let task_backend = Arc::clone(&self.backend);
+                            let task_client = data_client.clone();
+                            let task_events = event_tx.clone();
+                            let task_welcome = Arc::clone(&welcome);
+                            tasks.spawn(async move {
+                                let result = Self::process_lease(
+                                    task_config,
+                                    task_backend,
+                                    task_client,
+                                    task_events,
+                                    task_welcome,
+                                    session_id,
+                                    lease,
+                                )
+                                .await;
+                                (job_id, lease_id, result)
+                            });
+                        }
+                        Some(coordinator_command::Command::Cancel(_)) => {}
+                        Some(coordinator_command::Command::Drain(_)) => {
+                            draining = true;
+                            send_draining(&event_tx, session_id).await?;
+                            if active.is_empty() {
+                                return Ok(());
+                            }
+                        }
+                        Some(coordinator_command::Command::Error(error)) => {
+                            return Err(ServiceError::protocol(error.bounded_message));
+                        }
+                        Some(coordinator_command::Command::Welcome(_)) => {
+                            return Err(ServiceError::protocol(
+                                "AgentWelcome appeared more than once",
+                            ));
+                        }
+                        None => {
+                            return Err(ServiceError::protocol(
+                                "empty coordinator command",
+                            ));
+                        }
                     }
-                    self.process_lease(
-                        &mut data_client.clone(),
+                }
+                completed = tasks.join_next(), if !active.is_empty() => {
+                    let (job_id, lease_id, result) = completed
+                        .ok_or_else(|| {
+                            ServiceError::transport(
+                                "agent measurement task set ended unexpectedly",
+                            )
+                        })?
+                        .map_err(|error| ServiceError::transport(error.to_string()))?;
+                    if active.remove(&job_id) != Some(lease_id) {
+                        return Err(ServiceError::protocol(
+                            "completed measurement task was not active",
+                        ));
+                    }
+                    result?;
+                    if draining && active.is_empty() {
+                        return Ok(());
+                    }
+                    if !draining {
+                        send_ready(
+                            &event_tx,
+                            session_id,
+                            job_slots.saturating_sub(active.len() as u32),
+                        )
+                        .await?;
+                    }
+                }
+                _ = heartbeat.tick() => {
+                    send_ready(
                         &event_tx,
-                        &welcome,
                         session_id,
-                        lease,
+                        if draining {
+                            0
+                        } else {
+                            job_slots.saturating_sub(active.len() as u32)
+                        },
                     )
                     .await?;
-                    send_ready(&event_tx, session_id, 1).await?;
                 }
-                Some(coordinator_command::Command::Cancel(_)) => {}
-                Some(coordinator_command::Command::Drain(_)) => {
-                    send_draining(&event_tx, session_id).await?;
-                    return Ok(());
-                }
-                Some(coordinator_command::Command::Error(error)) => {
-                    return Err(ServiceError::protocol(error.bounded_message));
-                }
-                Some(coordinator_command::Command::Welcome(_)) => {
-                    return Err(ServiceError::protocol(
-                        "AgentWelcome appeared more than once",
-                    ));
-                }
-                None => return Err(ServiceError::protocol("empty coordinator command")),
             }
         }
     }
 
     async fn process_lease(
-        &self,
-        client: &mut MeasureFleetClient<Channel>,
-        event_tx: &mpsc::Sender<wire::AgentEvent>,
-        welcome: &wire::AgentWelcome,
+        config: Arc<AgentConfig>,
+        backend: Arc<B>,
+        mut client: MeasureFleetClient<Channel>,
+        event_tx: mpsc::Sender<wire::AgentEvent>,
+        welcome: Arc<wire::AgentWelcome>,
         session_id: SessionId,
         lease: wire::MeasureLease,
     ) -> ServiceResult<()> {
@@ -323,7 +439,7 @@ where
             .await
             .map_err(|_| ServiceError::Closed)?;
         send_heartbeat(
-            event_tx,
+            &event_tx,
             session_id,
             job_id,
             lease_id,
@@ -332,12 +448,13 @@ where
         )
         .await?;
 
+        let attempt_started = Instant::now();
         let mut subjects = Vec::with_capacity(lease.subjects.len());
         for subject in &lease.subjects {
             subjects.push(
                 fetch_subject(
-                    client,
-                    self.config.rpc_timeout,
+                    &mut client,
+                    config.rpc_timeout,
                     welcome.max_artifact_bytes,
                     session_id,
                     job_id,
@@ -347,72 +464,87 @@ where
                 .await?,
             );
         }
+        let fetch_elapsed_ms =
+            u64::try_from(attempt_started.elapsed().as_millis()).unwrap_or(u64::MAX);
         send_heartbeat(
-            event_tx,
+            &event_tx,
             session_id,
             job_id,
             lease_id,
-            wire::JobPhase::Measure,
-            0,
+            wire::JobPhase::VerifyArtifact,
+            fetch_elapsed_ms,
         )
         .await?;
 
-        let started = Instant::now();
-        let backend = Arc::clone(&self.backend);
         let backend_lease = lease.clone();
         let measurement =
             tokio::task::spawn_blocking(move || backend.measure(&backend_lease, subjects));
         tokio::pin!(measurement);
         let heartbeat = Duration::from_millis(welcome.heartbeat_interval_ms);
-        let measured = loop {
+        let mut measured = loop {
             tokio::select! {
                 result = &mut measurement => {
                     break result.map_err(|error| ServiceError::transport(error.to_string()))?;
                 }
                 _ = tokio::time::sleep(heartbeat) => {
                     send_heartbeat(
-                        event_tx,
+                        &event_tx,
                         session_id,
                         job_id,
                         lease_id,
                         wire::JobPhase::Measure,
-                        started.elapsed().as_millis() as u64,
+                        u64::try_from(attempt_started.elapsed().as_millis())
+                            .unwrap_or(u64::MAX),
                     ).await?;
                 }
             }
         };
+        if let Ok(measurement) = &mut measured {
+            for sample in &mut measurement.telemetry {
+                sample.attempt_elapsed_ms =
+                    sample.attempt_elapsed_ms.saturating_add(fetch_elapsed_ms);
+            }
+            measurement.telemetry.insert(
+                0,
+                wire::TelemetrySample {
+                    attempt_elapsed_ms: fetch_elapsed_ms,
+                    phase: wire::JobPhase::FetchArtifact as i32,
+                    telemetry: None,
+                },
+            );
+        }
 
         let report = build_report(
-            &self.config,
+            &config,
             session_id,
-            device_profile_hash(&self.config.profile),
+            device_profile_hash(&config.profile),
             &lease,
             measured,
         )?;
         send_heartbeat(
-            event_tx,
+            &event_tx,
             session_id,
             job_id,
             lease_id,
             wire::JobPhase::PersistReport,
-            started.elapsed().as_millis() as u64,
+            u64::try_from(attempt_started.elapsed().as_millis()).unwrap_or(u64::MAX),
         )
         .await?;
-        let report_path = persist_report(&self.config.state_dir, &report).await?;
+        let report_path = persist_report(&config.state_dir, &report).await?;
         send_heartbeat(
-            event_tx,
+            &event_tx,
             session_id,
             job_id,
             lease_id,
             wire::JobPhase::SubmitReport,
-            started.elapsed().as_millis() as u64,
+            u64::try_from(attempt_started.elapsed().as_millis()).unwrap_or(u64::MAX),
         )
         .await?;
 
         submit_persisted_report(
-            client,
-            self.config.rpc_timeout,
-            &self.config.state_dir,
+            &mut client,
+            config.rpc_timeout,
+            &config.state_dir,
             session_id,
             report,
             report_path,
@@ -427,7 +559,10 @@ struct PersistedReport {
     report: wire::MeasureReport,
 }
 
-async fn load_persisted_reports(config: &AgentConfig) -> ServiceResult<Vec<PersistedReport>> {
+async fn load_persisted_reports(
+    config: &AgentConfig,
+    max_reports: usize,
+) -> ServiceResult<Vec<PersistedReport>> {
     let state_dir = config.state_dir.clone();
     let device_id = config.device_id;
     let profile_hash = device_profile_hash(&config.profile);
@@ -457,9 +592,9 @@ async fn load_persisted_reports(config: &AgentConfig) -> ServiceResult<Vec<Persi
             LeaseId::from_slice(&report.lease_id)?;
             persisted.push(PersistedReport { path, report });
         }
-        if persisted.len() > 1 {
+        if persisted.len() > max_reports {
             return Err(ServiceError::protocol(
-                "single-slot agent found more than one persisted report",
+                "agent found more persisted reports than measurement slots",
             ));
         }
         Ok(persisted)
@@ -660,9 +795,20 @@ fn validate_lease(
     {
         return Err(ServiceError::protocol("lease device profile mismatch"));
     }
-    if lease.kind != wire::MeasureKind::Single as i32 || lease.subjects.len() != 1 {
+    let kind = wire::MeasureKind::try_from(lease.kind)
+        .map_err(|_| ServiceError::protocol("lease measurement kind is unknown"))?;
+    let expected_subjects = match kind {
+        wire::MeasureKind::Single => 1,
+        wire::MeasureKind::SymmetricPair => 2,
+        wire::MeasureKind::Unspecified => {
+            return Err(ServiceError::protocol(
+                "lease measurement kind is unspecified",
+            ));
+        }
+    };
+    if lease.subjects.len() != expected_subjects {
         return Err(ServiceError::protocol(
-            "first agent slice supports single-subject leases only",
+            "lease measurement kind has the wrong subject count",
         ));
     }
     if lease.measure_config_payload.len() > welcome.max_measure_config_bytes as usize {
@@ -678,26 +824,27 @@ fn validate_lease(
     {
         return Err(ServiceError::protocol("lease engine capability mismatch"));
     }
-    let subject = &lease.subjects[0];
-    if subject.logical_index != 0 || subject.graph_hash.len() != 32 {
-        return Err(ServiceError::protocol("lease subject is malformed"));
-    }
-    let artifact = subject
-        .artifact
-        .as_ref()
-        .ok_or_else(|| ServiceError::protocol("lease artifact reference is missing"))?;
-    ArtifactDigest::from_slice(&artifact.artifact_digest)?;
-    if artifact.artifact_size > welcome.max_artifact_bytes {
-        return Err(ServiceError::capacity("lease artifact is too large"));
-    }
-    let supported = capability.artifact_formats.iter().any(|supported| {
-        supported.format_kind == artifact.format_kind
-            && supported.adapter_format_id == artifact.adapter_format_id
-    });
-    if !supported {
-        return Err(ServiceError::protocol(
-            "lease artifact format is unsupported",
-        ));
+    for (logical_index, subject) in lease.subjects.iter().enumerate() {
+        if subject.logical_index != logical_index as u32 || subject.graph_hash.len() != 32 {
+            return Err(ServiceError::protocol("lease subject is malformed"));
+        }
+        let artifact = subject
+            .artifact
+            .as_ref()
+            .ok_or_else(|| ServiceError::protocol("lease artifact reference is missing"))?;
+        ArtifactDigest::from_slice(&artifact.artifact_digest)?;
+        if artifact.artifact_size > welcome.max_artifact_bytes {
+            return Err(ServiceError::capacity("lease artifact is too large"));
+        }
+        let supported = capability.artifact_formats.iter().any(|supported| {
+            supported.format_kind == artifact.format_kind
+                && supported.adapter_format_id == artifact.adapter_format_id
+        });
+        if !supported {
+            return Err(ServiceError::protocol(
+                "lease artifact format is unsupported",
+            ));
+        }
     }
     Ok(())
 }
@@ -706,6 +853,7 @@ async fn reject_lease(
     event_tx: &mpsc::Sender<wire::AgentEvent>,
     session_id: SessionId,
     lease: &wire::MeasureLease,
+    reason: wire::JobRejectReason,
     message: String,
 ) -> ServiceResult<()> {
     event_tx
@@ -714,7 +862,7 @@ async fn reject_lease(
                 session_id: session_id.to_vec(),
                 job_id: lease.job_id.clone(),
                 lease_id: lease.lease_id.clone(),
-                reason: wire::JobRejectReason::JobRejectUnsupportedConfig as i32,
+                reason: reason as i32,
                 bounded_message: bounded_utf8(message, MAX_BOUNDED_STRING_BYTES),
             })),
         })

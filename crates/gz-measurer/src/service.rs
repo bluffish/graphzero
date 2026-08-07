@@ -1,6 +1,6 @@
 use crate::{CompletedEpisodeArtifact, MeasurerError, episode_reward, project_episode};
 use gz_engine::{GraphHash, ModelVersion, PortableSearchActionRef};
-use gz_replay::{ReplayError, ReplayStore};
+use gz_replay::{ReplayError, ReplayStore, SymmetricRewardTargetScale, SymmetricRewardTieEpsilon};
 use std::collections::{BTreeMap, HashSet};
 
 #[derive(Clone, Debug, PartialEq)]
@@ -56,15 +56,23 @@ pub struct MeasurerStats {
 
 pub struct ReplayMeasurer<'a> {
     store: &'a ReplayStore,
+    reward_tie_epsilon: SymmetricRewardTieEpsilon,
+    reward_target_scale: SymmetricRewardTargetScale,
     summary: MeasurerRunSummary,
     ledger: MeasureLedger,
 }
 
 impl<'a> ReplayMeasurer<'a> {
     #[must_use]
-    pub fn new(store: &'a ReplayStore) -> Self {
+    pub fn new(
+        store: &'a ReplayStore,
+        reward_tie_epsilon: SymmetricRewardTieEpsilon,
+        reward_target_scale: SymmetricRewardTargetScale,
+    ) -> Self {
         Self {
             store,
+            reward_tie_epsilon,
+            reward_target_scale,
             summary: MeasurerRunSummary::default(),
             ledger: MeasureLedger::default(),
         }
@@ -81,7 +89,8 @@ impl<'a> ReplayMeasurer<'a> {
             self.ledger.observe(&game.p2_artifact);
         }
 
-        let projected = project_symmetric_game(&game);
+        let projected =
+            project_symmetric_game(&game, self.reward_tie_epsilon, self.reward_target_scale);
         let (status, replay_rows) = match projected {
             Ok((p1, p2, p1_target)) => {
                 let value_sign_accuracy = symmetric_value_sign_accuracies(&game, p1_target);
@@ -136,6 +145,8 @@ const VALUE_SIGN_LATE_STEP: usize = 40;
 
 fn project_symmetric_game(
     game: &MeasuredSymmetricGame,
+    reward_tie_epsilon: SymmetricRewardTieEpsilon,
+    reward_target_scale: SymmetricRewardTargetScale,
 ) -> Result<ProjectedSymmetricGame, MeasurerError> {
     let p1_reward = episode_reward(&game.p1_artifact).ok_or(MeasurerError::Unmeasured)?;
     let p2_reward = episode_reward(&game.p2_artifact).ok_or(MeasurerError::Unmeasured)?;
@@ -144,6 +155,8 @@ fn project_symmetric_game(
         p2_reward,
         symmetric_rewrite_count(&game.p1_artifact),
         symmetric_rewrite_count(&game.p2_artifact),
+        reward_tie_epsilon,
+        reward_target_scale,
     );
     let mut p1 = project_episode(&game.p1_artifact)?;
     let mut p2 = project_episode(&game.p2_artifact)?;
@@ -162,10 +175,21 @@ fn symmetric_rewrite_count(artifact: &CompletedEpisodeArtifact) -> usize {
         .count()
 }
 
-fn symmetric_outcome_target(p1_reward: f32, p2_reward: f32, p1_len: usize, p2_len: usize) -> f32 {
-    if p1_reward > p2_reward {
+fn symmetric_outcome_target(
+    p1_reward: f32,
+    p2_reward: f32,
+    p1_len: usize,
+    p2_len: usize,
+    reward_tie_epsilon: SymmetricRewardTieEpsilon,
+    reward_target_scale: SymmetricRewardTargetScale,
+) -> f32 {
+    let reward_delta = p1_reward - p2_reward;
+    if reward_target_scale.is_graded() {
+        return (reward_delta / reward_target_scale.get()).tanh();
+    }
+    if reward_delta > reward_tie_epsilon.get() {
         1.0
-    } else if p1_reward < p2_reward {
+    } else if reward_delta < -reward_tie_epsilon.get() {
         -1.0
     } else if p1_len < p2_len {
         1.0
@@ -221,6 +245,13 @@ fn set_horizon_value_targets(
     let targets = crate::horizon_value_targets(artifact, terminal_target)?;
     for (row, target) in projected.1.iter_mut().zip(targets) {
         row.horizon_value_targets = Some(target);
+    }
+    if let Some(row) = projected
+        .1
+        .last_mut()
+        .filter(|row| row.kind == gz_replay::ReplayRowKind::Terminal)
+    {
+        row.horizon_value_targets = Some([terminal_target; 2]);
     }
     Ok(())
 }

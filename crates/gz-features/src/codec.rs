@@ -60,16 +60,6 @@ pub fn encode_feature_row(
     out: &mut Vec<u8>,
 ) -> FeatureResult<()> {
     row.validate(schema)?;
-    // v2 packs node indexes and kind tokens as u16 (rows persist in replay
-    // stores, so this is the storage half of the wire-narrowing work) and
-    // floats as bf16, matching the batch encoding's precision exactly:
-    // the trainer sees identical numerics either way.
-    if schema.config().max_nodes > u32::from(u16::MAX) {
-        return Err(FeatureError::InvalidEncoding(
-            "max_nodes exceeds u16 row width",
-        ));
-    }
-
     out.clear();
     out.extend_from_slice(ROW_MAGIC);
     write_u32(out, ENCODING_VERSION);
@@ -92,7 +82,7 @@ pub fn encode_feature_row(
             .map_err(|_| FeatureError::InvalidEncoding("subject count exceeds u8"))?;
         out.push(subject_count);
         for subject in &action.subjects {
-            write_u16(out, narrow_index(*subject, "action subject")?);
+            write_u32(out, *subject);
         }
     }
 
@@ -123,9 +113,6 @@ pub fn decode_feature_row(bytes: &[u8]) -> FeatureResult<FeatureRow> {
     let (node_tokens, node_attrs, edges) = read_state_body(&mut reader, node_count)?;
 
     let action_count = reader.len()?;
-    if action_count == 0 {
-        return Err(FeatureError::InvalidEncoding("zero action count"));
-    }
     let mut actions = Vec::with_capacity(action_count);
     for _ in 0..action_count {
         let kind_token = u32::from(reader.u16()?);
@@ -136,7 +123,7 @@ pub fn decode_feature_row(bytes: &[u8]) -> FeatureResult<FeatureRow> {
         let subject_count = usize::from(reader.u8()?);
         let mut subjects = Vec::with_capacity(subject_count);
         for _ in 0..subject_count {
-            let subject = u32::from(reader.u16()?);
+            let subject = reader.u32()?;
             if subject >= node_count {
                 return Err(FeatureError::InvalidEncoding("action subject out of range"));
             }
@@ -214,8 +201,8 @@ fn write_state_body(
 
     write_u32(out, edges.len() as u32);
     for edge in edges {
-        write_u16(out, narrow_index(edge.src, "edge src")?);
-        write_u16(out, narrow_index(edge.dst, "edge dst")?);
+        write_u32(out, edge.src);
+        write_u32(out, edge.dst);
         out.push(edge.edge_type);
     }
     Ok(())
@@ -243,8 +230,8 @@ fn read_state_body(
     let mut edges = Vec::with_capacity(edge_count);
     for _ in 0..edge_count {
         let edge = FeatureEdge {
-            src: u32::from(reader.u16()?),
-            dst: u32::from(reader.u16()?),
+            src: reader.u32()?,
+            dst: reader.u32()?,
             edge_type: reader.u8()?,
         };
         if edge.src >= node_count || edge.dst >= node_count {

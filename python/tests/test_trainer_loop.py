@@ -49,6 +49,19 @@ def test_policy_ce_loss_masks_padding_and_reserved_stop() -> None:
     assert logits.grad[0, 2].item() == 0.0
 
 
+def test_policy_ce_loss_ignores_value_only_zero_action_rows() -> None:
+    logits = torch.tensor([[0.0, 0.0], [50.0, -50.0]], requires_grad=True)
+    policy = torch.tensor([[0.25, 0.75], [0.0, 0.0]])
+    action_count = torch.tensor([2, 0])
+
+    loss = policy_ce_loss(logits, policy, action_count, row_count=2)
+
+    assert float(loss.detach()) == pytest.approx(math.log(2.0))
+    loss.backward()
+    assert logits.grad is not None
+    assert logits.grad[1].tolist() == [0.0, 0.0]
+
+
 def test_t4_soft_policy_target_preserves_zeros_and_renormalizes() -> None:
     policy = torch.tensor(
         [
@@ -134,7 +147,40 @@ def test_auxiliary_task_loss_uses_configured_weights_and_node_scale() -> None:
     assert float(v32) == pytest.approx(0.625)
     assert float(score) == pytest.approx(0.0, abs=1e-12)
     assert float(combined) == pytest.approx(0.75)
-    torch.testing.assert_close(prediction * 100.0, torch.tensor([73.0, 20.0]))
+    torch.testing.assert_close(prediction, torch.tensor([73.0, 20.0]))
+
+
+def test_auxiliary_latency_loss_uses_log1p_cost_and_handles_penalty() -> None:
+    model = SimpleNamespace(schema=SimpleNamespace(max_nodes=100))
+    costs = torch.tensor([5.25, 10_000.0])
+    batch = training_batch(2)._replace(
+        value=torch.tensor([1.0, -1.0]),
+        horizon_value=torch.tensor([[0.5, -0.5], [1.0, -1.0]]),
+        horizon_value_valid=torch.ones(2),
+        reward=-costs,
+    )
+    log_costs = torch.log1p(costs)
+    score_raw = torch.log(torch.expm1(log_costs))
+    config = LoopConfig(
+        value_final_weight=0.5,
+        value_v8_weight=0.2,
+        value_v32_weight=0.2,
+        terminal_score_weight=0.1,
+        terminal_score_target="log1p-cost-ms",
+    )
+
+    combined, _, _, _, score, prediction = auxiliary_task_loss(
+        model,
+        torch.zeros(2),
+        torch.zeros((2, 2)),
+        score_raw,
+        batch,
+        config,
+    )
+
+    assert float(score) == pytest.approx(0.0, abs=1e-12)
+    assert torch.isfinite(combined)
+    torch.testing.assert_close(prediction, costs, rtol=1e-5, atol=1e-5)
 
 
 @pytest.mark.parametrize(
@@ -312,6 +358,13 @@ def test_auxiliary_model_trains_through_shared_and_independent_batches() -> None
     soft_before = model.soft_policy.pointer_key.weight.detach().clone()
     metrics = TrainerLoop(model, config).train_step(batch)
     assert metrics is not None
+    assert metrics.policy_target_entropy == pytest.approx(0.0)
+    assert metrics.policy_kl == pytest.approx(metrics.policy_loss)
+    assert metrics.policy_uniform_advantage == pytest.approx(
+        0.5 * torch.log(torch.tensor(2.0)).item() - metrics.policy_loss
+    )
+    assert metrics.policy_logit_std >= 0.0
+    assert metrics.policy_logit_abs_mean >= 0.0
     assert metrics.soft_policy_loss > metrics.soft_policy_target_entropy
     assert metrics.soft_policy_kl == pytest.approx(
         metrics.soft_policy_loss - metrics.soft_policy_target_entropy

@@ -34,6 +34,7 @@ def trainer_loop_config(
         value_v8_weight=config.value_v8_weight,
         value_v32_weight=config.value_v32_weight,
         terminal_score_weight=config.terminal_score_weight,
+        terminal_score_target=config.terminal_score_target,
         soft_policy_weight=config.soft_policy_weight,
         soft_policy_temperature=config.soft_policy_temperature,
         soft_policy_trunk_grad_scale=config.soft_policy_trunk_grad_scale,

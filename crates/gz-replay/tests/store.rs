@@ -111,6 +111,38 @@ fn append_then_read_back_episode() {
 }
 
 #[test]
+fn terminal_sampling_is_episode_uniform_and_returns_only_terminal_rows() {
+    let dir = common::temp_dir();
+    let store = ReplayStore::open(dir.path()).unwrap();
+    bind_unfeaturized(&store, ReplayDataMode::SymmetricSelfplay);
+    let first = symmetric_episode_with_terminal(2, -5.0, 1.0);
+    let second = symmetric_episode_with_terminal(5, 5.0, -1.0);
+    store
+        .append_episode_pair((&first.0, &first.1), (&second.0, &second.1))
+        .unwrap();
+    let before = store.counters().consumed_rows;
+    let sampled = store
+        .sample_terminal_rows(SampleConfig {
+            batch: std::num::NonZeroUsize::new(100).unwrap(),
+            window_rows: std::num::NonZeroU64::new(store.counters().produced_rows).unwrap(),
+            seed: 17,
+        })
+        .unwrap();
+
+    assert!(
+        sampled
+            .iter()
+            .all(|(_, row)| row.kind == gz_replay::ReplayRowKind::Terminal)
+    );
+    let episode_ids = sampled
+        .iter()
+        .map(|(episode, _)| episode.get())
+        .collect::<std::collections::BTreeSet<_>>();
+    assert_eq!(episode_ids, std::collections::BTreeSet::from([0, 1]));
+    assert_eq!(store.counters().consumed_rows, before + 100);
+}
+
+#[test]
 fn episode_pair_is_atomic_and_counts_as_one_game() {
     let dir = common::temp_dir();
     let store = ReplayStore::open(dir.path()).unwrap();
@@ -269,6 +301,48 @@ fn replay_data_mode_prevents_standard_and_symmetric_mixing() {
 }
 
 #[test]
+fn replay_contract_prevents_symmetric_reward_epsilon_mixing() {
+    let dir = common::temp_dir();
+    let store = ReplayStore::open(dir.path()).unwrap();
+    let contract = |epsilon| {
+        ReplayContract::unfeaturized(ReplayDataMode::SymmetricSelfplay, engine_identity())
+            .with_symmetric_reward_tie_epsilon(
+                gz_replay::SymmetricRewardTieEpsilon::new(epsilon).unwrap(),
+            )
+    };
+
+    store.ensure_contract(&contract(0.01)).unwrap();
+    store.ensure_contract(&contract(0.01)).unwrap();
+    assert_eq!(
+        store.ensure_contract(&contract(0.02)).unwrap_err(),
+        ReplayError::TargetContractMismatch
+    );
+
+    drop(store);
+    let reopened = ReplayStore::open(dir.path()).unwrap();
+    reopened.ensure_contract(&contract(0.01)).unwrap();
+}
+
+#[test]
+fn replay_contract_prevents_symmetric_reward_target_scale_mixing() {
+    let dir = common::temp_dir();
+    let store = ReplayStore::open(dir.path()).unwrap();
+    let contract = |scale| {
+        ReplayContract::unfeaturized(ReplayDataMode::SymmetricSelfplay, engine_identity())
+            .with_symmetric_reward_target_scale(
+                gz_replay::SymmetricRewardTargetScale::new(scale).unwrap(),
+            )
+    };
+
+    store.ensure_contract(&contract(5.0)).unwrap();
+    store.ensure_contract(&contract(5.0)).unwrap();
+    assert_eq!(
+        store.ensure_contract(&contract(2.0)).unwrap_err(),
+        ReplayError::TargetContractMismatch
+    );
+}
+
+#[test]
 fn admission_rejects_unmeasured_invalid_and_non_finite_final_measure() {
     let dir = common::temp_dir();
     let store = ReplayStore::open(dir.path()).unwrap();
@@ -333,7 +407,7 @@ fn admission_rejects_invalid_row_shapes() {
 }
 
 #[test]
-fn symmetric_value_target_validation_accepts_only_minus_one_zero_or_one() {
+fn symmetric_value_target_validation_accepts_continuous_unit_interval() {
     let dir = common::temp_dir();
     let store = ReplayStore::open(dir.path()).unwrap();
     bind_unfeaturized(&store, ReplayDataMode::SymmetricSelfplay);
@@ -342,14 +416,28 @@ fn symmetric_value_target_validation_accepts_only_minus_one_zero_or_one() {
         .append_episode_pair((&draw.0, &draw.1), (&draw.0, &draw.1))
         .unwrap();
 
-    let (mut invalid_record, mut invalid_rows) = symmetric_episode(1, -5.0, 1.0);
-    invalid_record.outcome.value_target = Some(0.5);
-    invalid_rows[0].value_target = Some(0.5);
+    let (mut positive_record, mut positive_rows) = symmetric_episode(1, -5.0, 1.0);
+    positive_record.outcome.value_target = Some(0.5);
+    positive_rows[0].value_target = Some(0.5);
+    let (mut negative_record, mut negative_rows) = symmetric_episode(2, -5.0, -1.0);
+    negative_record.outcome.value_target = Some(-0.5);
+    for row in &mut negative_rows {
+        row.value_target = Some(-0.5);
+    }
+    store
+        .append_episode_pair(
+            (&positive_record, &positive_rows),
+            (&negative_record, &negative_rows),
+        )
+        .unwrap();
+
+    positive_record.outcome.value_target = Some(1.1);
+    positive_rows[0].value_target = Some(1.1);
     assert_eq!(
         store
             .append_episode_pair(
-                (&invalid_record, &invalid_rows),
-                (&invalid_record, &invalid_rows),
+                (&positive_record, &positive_rows),
+                (&negative_record, &negative_rows),
             )
             .unwrap_err(),
         ReplayError::InvalidRecord
@@ -484,6 +572,27 @@ fn append_roundtrips_rows_with_feature_payloads() {
 
     assert_eq!(id, ReplayEpisodeId::new(0));
     assert!(sample.iter().all(|(_, row)| row.feature_row.is_some()));
+}
+
+#[test]
+fn inspection_sampling_does_not_advance_consumed_rows() {
+    let dir = common::temp_dir();
+    let store = ReplayStore::open(dir.path()).unwrap();
+    bind_featurized(&store, &feature_schema_config());
+    let (record, rows) = episode_with_feature_rows(2);
+    store.append_episode(&record, &rows).unwrap();
+
+    let before = store.counters();
+    let sampled = store
+        .inspect_rows(gz_replay::SampleConfig {
+            batch: std::num::NonZeroUsize::new(2).unwrap(),
+            window_rows: std::num::NonZeroU64::new(2).unwrap(),
+            seed: 3,
+        })
+        .unwrap();
+
+    assert_eq!(sampled.len(), 2);
+    assert_eq!(store.counters(), before);
 }
 
 #[test]
@@ -770,5 +879,33 @@ fn symmetric_episode(
         row.reward_target = Some(reward);
         row.final_measure = final_measure.clone();
     }
+    (record, rows)
+}
+
+fn symmetric_episode_with_terminal(
+    row_count: usize,
+    reward: f32,
+    value_target: f32,
+) -> (gz_replay::ReplayEpisodeRecord, Vec<gz_replay::ReplayRow>) {
+    let (mut record, mut rows) = symmetric_episode(row_count, reward, value_target);
+    let action_history = record.steps.iter().map(|step| step.action).collect();
+    rows.push(gz_replay::ReplayRow {
+        kind: gz_replay::ReplayRowKind::Terminal,
+        step_index: row_count as u32,
+        root: record.root,
+        state: record.final_graph,
+        action_history,
+        legal_actions: Vec::new(),
+        policy_target: Vec::new(),
+        selected_action: None,
+        value_target: Some(value_target),
+        horizon_value_targets: Some([value_target; 2]),
+        reward_target: Some(reward),
+        final_measure: record.final_measure.clone(),
+        model_version: None,
+        search_config_hash: record.search_config_hash,
+        feature_row: None,
+    });
+    record.row_count += 1;
     (record, rows)
 }

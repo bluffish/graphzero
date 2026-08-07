@@ -145,8 +145,8 @@ class BatchView:
             node_tokens=_array(view, layout.node_tokens, "<u2", (layout.b, layout.n)),
             node_attrs=node_attrs,
             edge_count=_array(view, layout.edge_count, "<u4", (layout.b,)),
-            edge_src=_array(view, layout.edge_src, "<u2", (layout.b, layout.e)),
-            edge_dst=_array(view, layout.edge_dst, "<u2", (layout.b, layout.e)),
+            edge_src=_array(view, layout.edge_src, "<u4", (layout.b, layout.e)),
+            edge_dst=_array(view, layout.edge_dst, "<u4", (layout.b, layout.e)),
             edge_type=_array(view, layout.edge_type, "u1", (layout.b, layout.e)),
             action_count=_array(view, layout.action_count, "<u4", (layout.b,)),
             action_kind=_array(view, layout.action_kind, "<u2", (layout.b, layout.a)),
@@ -155,7 +155,7 @@ class BatchView:
             action_subjects=_array(
                 view,
                 layout.action_subjects,
-                "<u2",
+                "<u4",
                 (layout.b, layout.a, layout.s),
             ),
             position=_bf16_array(view, layout.position, (layout.b, 4)),
@@ -166,8 +166,8 @@ class BatchView:
             opponent_node_tokens=_array(view, layout.opponent_node_tokens, "<u2", (layout.b, layout.n)),
             opponent_node_attrs=opponent_node_attrs,
             opponent_edge_count=_array(view, layout.opponent_edge_count, "<u4", (layout.b,)),
-            opponent_edge_src=_array(view, layout.opponent_edge_src, "<u2", (layout.b, layout.e)),
-            opponent_edge_dst=_array(view, layout.opponent_edge_dst, "<u2", (layout.b, layout.e)),
+            opponent_edge_src=_array(view, layout.opponent_edge_src, "<u4", (layout.b, layout.e)),
+            opponent_edge_dst=_array(view, layout.opponent_edge_dst, "<u4", (layout.b, layout.e)),
             opponent_edge_type=_array(view, layout.opponent_edge_type, "u1", (layout.b, layout.e)),
             opponent_position=_bf16_array(view, layout.opponent_position, (layout.b, 4)),
         )
@@ -196,14 +196,14 @@ def _layout(b: int, n: int, e: int, a: int, s: int, d: int) -> _Layout:
     node_tokens, cursor = _section(cursor, b * n * 2)
     node_attrs, cursor = _section(cursor, b * n * d * 2)
     edge_count, cursor = _section(cursor, b * 4)
-    edge_src, cursor = _section(cursor, b * e * 2)
-    edge_dst, cursor = _section(cursor, b * e * 2)
+    edge_src, cursor = _section(cursor, b * e * 4)
+    edge_dst, cursor = _section(cursor, b * e * 4)
     edge_type, cursor = _section(cursor, b * e)
     action_count, cursor = _section(cursor, b * 4)
     action_kind, cursor = _section(cursor, b * a * 2)
     action_prior, cursor = _section(cursor, b * a * 2)
     subject_count, cursor = _section(cursor, b * a)
-    action_subjects, cursor = _section(cursor, b * a * s * 2)
+    action_subjects, cursor = _section(cursor, b * a * s * 4)
     position, cursor = _section(cursor, b * 4 * 2)
     opponent_reward, cursor = _section(cursor, b * 2)
     opponent_present, cursor = _section(cursor, b)
@@ -214,8 +214,8 @@ def _layout(b: int, n: int, e: int, a: int, s: int, d: int) -> _Layout:
     opponent_node_tokens, cursor = _section(cursor, b * n * 2)
     opponent_node_attrs, cursor = _section(cursor, b * n * d * 2)
     opponent_edge_count, cursor = _section(cursor, b * 4)
-    opponent_edge_src, cursor = _section(cursor, b * e * 2)
-    opponent_edge_dst, cursor = _section(cursor, b * e * 2)
+    opponent_edge_src, cursor = _section(cursor, b * e * 4)
+    opponent_edge_dst, cursor = _section(cursor, b * e * 4)
     opponent_edge_type, cursor = _section(cursor, b * e)
     opponent_position, cursor = _section(cursor, b * 4 * 2)
     return _Layout(

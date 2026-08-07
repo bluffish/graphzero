@@ -10,20 +10,12 @@ const INVALID_ARTIFACT_CODE: ErrorCode = ErrorCode::new(4);
 #[derive(Debug)]
 pub enum CompilerEngineBuildError {
     Native(NativeCompilerEngineError),
-    TooManyActionKinds { count: usize },
 }
 
 impl fmt::Display for CompilerEngineBuildError {
     fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             Self::Native(error) => write!(formatter, "{error}"),
-            Self::TooManyActionKinds { count } => {
-                write!(
-                    formatter,
-                    "compiler exposes {count} action kinds; maximum is {}",
-                    u64::from(u32::MAX) + 1
-                )
-            }
         }
     }
 }
@@ -32,7 +24,6 @@ impl std::error::Error for CompilerEngineBuildError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         match self {
             Self::Native(error) => Some(error),
-            Self::TooManyActionKinds { .. } => None,
         }
     }
 }
@@ -55,15 +46,8 @@ pub(crate) fn native_error(error: NativeCompilerEngineError) -> EngineError {
         | NativeCompilerEngineError::StaleCandidate(_) => EngineError::UnknownCandidate {
             candidate_hash: None,
         },
-        error => internal_error(NATIVE_ENGINE_ERROR_CODE, error.to_string()),
+        error => internal_error(NATIVE_ENGINE_ERROR_CODE, error_chain(&error)),
     }
-}
-
-pub(crate) fn action_kind_invariant() -> EngineError {
-    internal_error(
-        NATIVE_ENGINE_ERROR_CODE,
-        "compiler candidate references an unregistered action definition",
-    )
 }
 
 pub(crate) fn measure_config_mismatch() -> EngineError {
@@ -89,6 +73,17 @@ pub(crate) fn internal_error(code: ErrorCode, message: impl Into<String>) -> Eng
         code,
         message: bounded_message(message.into()),
     }
+}
+
+pub(crate) fn error_chain(error: &(dyn std::error::Error + 'static)) -> String {
+    let mut message = error.to_string();
+    let mut source = error.source();
+    while let Some(error) = source {
+        message.push_str(": ");
+        message.push_str(&error.to_string());
+        source = error.source();
+    }
+    message
 }
 
 pub(crate) fn bounded_message(mut message: String) -> ErrorMessage {

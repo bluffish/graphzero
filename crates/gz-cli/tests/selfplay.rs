@@ -1,5 +1,8 @@
 use gz_cli::remote_measure::{RemoteAgentEnrollment, RemoteMeasureConfig};
-use gz_cli::selfplay::{EvaluatorMode, ReplayInitConfig, SelfplayConfig, init_replay, run};
+use gz_cli::selfplay::{
+    EngineKind, EvaluatorMode, ReplayInitConfig, SelfplayConfig, SelfplayEngineConfig, init_replay,
+    run,
+};
 use gz_measure_agent::{WhittleBackend, named_test_profile};
 use gz_measure_service::{AgentConfig, AgentRuntime, AgentTlsConfig, DeviceId};
 use gz_replay::{ReplayDataMode, ReplayEpisodeId, ReplayStore};
@@ -43,6 +46,7 @@ fn replay_init_persists_the_feature_schema() {
         replay_dir: Some(dir.path().to_path_buf()),
         max_candidates: 255,
         mask_stop: false,
+        ..ReplayInitConfig::default()
     })
     .unwrap();
 
@@ -86,6 +90,8 @@ fn stub_selfplay_appends_both_symmetric_perspectives() {
         );
         assert!(left.outcome.value_target.is_some());
         assert!(right.outcome.value_target.is_some());
+        assert_eq!(left.row_count as usize, left.steps.len() + 1);
+        assert_eq!(right.row_count as usize, right.steps.len() + 1);
     }
 }
 
@@ -139,6 +145,8 @@ fn stub_selfplay_commits_terminal_measures_through_remote_agent() {
     });
 
     let mut config = short_config(&replay_dir);
+    config.gumbel_scale = 1.0;
+    config.gumbel_noise_overlap = 0.0;
     config.remote_measure = RemoteMeasureConfig {
         listen: Some(address),
         server_certificate: Some(server_cert),
@@ -157,7 +165,7 @@ fn stub_selfplay_commits_terminal_measures_through_remote_agent() {
     agent.join().unwrap();
 
     assert_eq!(summary.episodes_appended, 2);
-    assert_eq!(receipt_count(&receipt_dir.join("receipts.log")), 4);
+    assert_eq!(receipt_count(&receipt_dir.join("receipts.log")), 2);
 }
 
 #[test]
@@ -204,6 +212,40 @@ fn validation_rejects_incoherent_runtime_settings() {
             .unwrap_err()
             .contains("checkpoint-pointer")
     );
+
+    let mut config = short_config(dir.path());
+    config.engine = SelfplayEngineConfig {
+        kind: EngineKind::Compiler,
+        compiler_deployment: Some(dir.path().join("deployment.toml")),
+        compiler_max_nodes: Some(256),
+        compiler_max_edges: Some(512),
+        compiler_max_subjects: Some(8),
+        compiler_feature_layout: Default::default(),
+        measure_samples: 4,
+    };
+    assert!(
+        config
+            .validate()
+            .unwrap_err()
+            .contains("requires remote measurement")
+    );
+
+    config.remote_measure = RemoteMeasureConfig {
+        listen: Some("127.0.0.1:0".parse().unwrap()),
+        server_certificate: Some(dir.path().join("server.pem")),
+        server_private_key: Some(dir.path().join("server.key")),
+        client_ca: Some(dir.path().join("ca.pem")),
+        agents: vec![RemoteAgentEnrollment {
+            device_id: DeviceId::from_bytes([7; 16]),
+            certificate: dir.path().join("agent.pem"),
+        }],
+        profile: None,
+        receipt_dir: Some(dir.path().join("receipts")),
+        startup_timeout: Duration::from_secs(1),
+    };
+    config.validate().unwrap();
+    config.remote_measure.profile = Some("whittle-only".to_owned());
+    assert!(config.validate().unwrap_err().contains("Whittle-only"));
 }
 
 #[test]
@@ -217,7 +259,7 @@ fn torch_evaluator_args_select_checkpoint_and_device() {
     config.eval_poll_interval = Some(0.0);
     config.validate().unwrap();
 
-    let args = config.evaluator_extra_args();
+    let args = config.evaluator_extra_args(0);
     assert!(args.windows(2).any(|pair| pair == ["--backend", "torch"]));
     assert!(
         args.windows(2)
@@ -225,7 +267,31 @@ fn torch_evaluator_args_select_checkpoint_and_device() {
     );
     assert!(args.windows(2).any(|pair| pair == ["--device", "cuda:1"]));
     assert!(args.windows(2).any(|pair| pair == ["--poll-interval", "0"]));
+    assert!(
+        args.windows(2)
+            .any(|pair| pair == ["--max-resident-model-generations", "2"])
+    );
     assert!(!args.iter().any(|arg| arg.starts_with("--require-")));
+}
+
+#[test]
+fn torch_evaluator_args_map_processes_to_devices() {
+    let dir = TestDir::new();
+    let mut config = short_config(dir.path());
+    config.evaluator = EvaluatorMode::Torch;
+    config.lanes = 2;
+    config.eval_processes = 2;
+    config.checkpoint_dir = Some(PathBuf::from("/checkpoints"));
+    config.eval_device = Some("cuda:0,cuda:1".to_owned());
+    config.validate().unwrap();
+
+    let first = config.evaluator_extra_args(0);
+    let second = config.evaluator_extra_args(1);
+    assert!(first.windows(2).any(|pair| pair == ["--device", "cuda:0"]));
+    assert!(second.windows(2).any(|pair| pair == ["--device", "cuda:1"]));
+
+    config.eval_device = Some("cuda:0,cuda:1,cuda:2".to_owned());
+    assert!(config.validate().unwrap_err().contains("one device"));
 }
 
 fn short_config(path: &Path) -> SelfplayConfig {

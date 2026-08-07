@@ -2,9 +2,9 @@
 
 Status: Draft
 
-Protocol version: 1.0
+Protocol version: 1.1
 
-Last updated: 2026-07-22
+Last updated: 2026-07-30
 
 ## 1. Purpose
 
@@ -540,15 +540,19 @@ message AgentHello {
   DeviceProfile profile = 5;
   repeated EngineCapability capabilities = 6;
   repeated LeaseRecovery recoveries = 7;
+  uint32 job_slots = 8;
 }
 ```
 
 Strings and repeated fields MUST have configured maximum lengths. Dynamic maps
 are not used in the protocol.
 
-Version 1 permits at most one recovery entry because an agent has one job slot.
+`job_slots` is the fixed bounded concurrency capacity for this session. It
+MUST be positive and no greater than the coordinator command capacity.
+Protocol minor 1 permits one recovery entry per bounded agent job slot, capped
+by the coordinator command capacity. Duplicate job IDs are invalid.
 If a new session supersedes a session with an active lease but does not report
-that lease for recovery, the coordinator cancels and requeues the old lease
+those leases for recovery, the coordinator cancels and requeues the old leases
 before accepting new readiness credit from the device.
 
 ### 10.2 `AgentWelcome`
@@ -589,14 +593,15 @@ message AgentReady {
 }
 ```
 
-Version 1 requires `free_slots` to be zero or one. The agent sends one only
-when it has no accepted or recovering lease and its local health gate permits
-new work.
+In protocol minor 1, `free_slots` is an absolute snapshot of unused bounded
+job slots and MUST NOT exceed `AgentHello.job_slots`. The coordinator consumes
+one unit when it offers a lease and MUST cap a repeated readiness snapshot by
+`slot_capacity - active_leases`, so an in-flight offer cannot recreate credit.
 
-While idle, the agent MUST resend `AgentReady` at the negotiated heartbeat
-interval. This is the idle-session health heartbeat. It sends `free_slots = 0`
-when connected but temporarily unable to accept work, and MUST send an
-immediate update when its readiness changes.
+The agent MUST resend `AgentReady` at the negotiated heartbeat interval. This
+is the session health heartbeat. It sends `free_slots = 0` when connected but
+temporarily unable to accept work, and MUST send an immediate update when its
+readiness changes.
 
 This is application-level credit. The coordinator MUST NOT assign more jobs
 than advertised credit, regardless of gRPC transport buffering.
@@ -757,7 +762,7 @@ success report for that lease is stale. An agent MUST NOT overwrite an already
 persisted report to change the outcome; it submits the immutable report and
 obeys the coordinator's disposition.
 
-`DrainAgent` prevents new leases. The current lease may complete unless the
+`DrainAgent` prevents new leases. Current leases may complete unless the
 command explicitly includes cancellation. An agent entering local shutdown
 sends `AgentDraining` and advertises zero free slots.
 
@@ -768,7 +773,7 @@ The control stream follows these ordering rules:
 1. The agent sends exactly one `AgentHello`.
 2. The coordinator sends exactly one `AgentWelcome` or terminates the RPC.
 3. Every recovery receives a disposition before new work is offered.
-4. An idle agent sends periodic `AgentReady` messages.
+4. A connected agent sends periodic absolute `AgentReady` snapshots.
 5. The coordinator sends a lease only against available readiness credit.
 6. The agent sends exactly one `JobAccepted` or `JobRejected` for the lease.
 7. An accepted lease produces heartbeats until report persistence,
@@ -1160,12 +1165,21 @@ explicitly defines a multi-profile objective.
 
 The coordinator MUST NOT fall back from one requested profile to another.
 
-### 15.2 Single-device exclusivity
+### 15.2 Bounded preparation pipeline and serialized execution
 
-Version 1 permits one accepted job per physical GPU. Compilation, capture,
-warm-up, and timed execution are all part of the exclusive interval. The agent
-MUST NOT compile another job concurrently because CPU, memory, power, and
-thermal contention can affect measurement validity.
+The compiler measurement policy identified by
+`bounded-compile-overlap-single-serialized-evaluator-v1` permits a fixed,
+bounded number of accepted jobs per physical GPU so compiler preparation for a
+later job can overlap execution of an already-prepared job. Every slot owns
+separate mutable compiler engine state. The deployment-defined slot count MUST
+be positive and MUST NOT exceed the agent's bounded command capacity.
+
+All slots for a device MUST share one evaluator worker. Accuracy execution,
+warm-up, and timed execution are serialized by that worker; GPU operations from
+different jobs never overlap. Concurrent compiler preparation can still affect
+CPU, memory, power, and thermals, so the pipeline policy and slot count are
+part of the measure-config hash and results are not interchangeable with
+exclusive measurements.
 
 ### 15.3 Queue bounds
 

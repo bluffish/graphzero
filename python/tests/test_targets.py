@@ -8,7 +8,11 @@ import pytest
 from gz.codec import BatchView, FeatureSchemaConfig, TargetsView
 from gz.codec.batch import EncodingError
 from gz.proto.frames import ENCODING_VERSION
-from gz.trainer.data import TrainingStager, _validate_terminal_scores
+from gz.trainer.data import (
+    TrainingStager,
+    _validate_terminal_costs,
+    _validate_terminal_scores,
+)
 from python.tests.test_codec import make_batch
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
@@ -78,6 +82,22 @@ def test_terminal_score_validation_requires_bounded_integral_node_counts() -> No
         struct.pack_into("<f", invalid, reward_offset, reward)
         with pytest.raises(ValueError, match=message):
             _validate_terminal_scores(TargetsView.parse(invalid), max_nodes=3)
+
+
+def test_terminal_cost_validation_accepts_latency_and_rejects_positive_reward() -> None:
+    valid = bytearray(make_targets())
+    reward_offset = _layout(2, 3)["reward"]
+    _f32(valid, reward_offset, [-5.25, -10_000.0])
+    _validate_terminal_costs(TargetsView.parse(valid))
+
+    for reward, message in [
+        (1.0, "non-negative"),
+        (float("nan"), "finite"),
+    ]:
+        invalid = bytearray(valid)
+        struct.pack_into("<f", invalid, reward_offset, reward)
+        with pytest.raises(ValueError, match=message):
+            _validate_terminal_costs(TargetsView.parse(invalid))
 
 
 def test_training_stager_copies_horizon_targets_and_validity() -> None:

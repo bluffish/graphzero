@@ -245,7 +245,9 @@ where
                     .map(|candidate| candidate.candidate),
             ),
             SearchWorkResult::Apply(applied) => self.move_graphs.push(applied.after),
-            SearchWorkResult::Measure(_) | SearchWorkResult::Eval(_) => {}
+            SearchWorkResult::Measure(_)
+            | SearchWorkResult::MeasurePair(_)
+            | SearchWorkResult::Eval(_) => {}
         }
     }
 
@@ -496,6 +498,10 @@ fn retokenize_work<G, C>(work: SearchWork<G, C>, token: WorkToken) -> SearchWork
         SearchWork::Measure(mut work) => {
             work.token = token;
             SearchWork::Measure(work)
+        }
+        SearchWork::MeasurePair(mut work) => {
+            work.token = token;
+            SearchWork::MeasurePair(work)
         }
         SearchWork::Eval(mut work) => {
             work.token = token;

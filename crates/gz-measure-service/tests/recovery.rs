@@ -3,8 +3,8 @@ use gz_engine_whittle::WhittleEngine;
 use gz_measure_service::wire::measure_fleet_client::MeasureFleetClient;
 use gz_measure_service::{
     Coordinator, CoordinatorConfig, CoordinatorServer, DeviceId, EncodedMeasureConfig, Enrollment,
-    InsecureTransport, MEASUREMENT_PROTOCOL_VERSION, MeasureSubmission, RequestNonce,
-    device_profile_hash, engine_identity_to_wire, wire,
+    InsecureTransport, MEASUREMENT_PROTOCOL_VERSION, MeasureSubmission, PROTOCOL_MINOR,
+    RequestNonce, device_profile_hash, engine_identity_to_wire, wire,
 };
 use tokio::sync::mpsc;
 use tokio_stream::wrappers::ReceiverStream;
@@ -190,12 +190,13 @@ fn hello(
     wire::AgentEvent {
         event: Some(wire::agent_event::Event::Hello(wire::AgentHello {
             protocol_major: 1,
-            protocol_minor: 0,
+            protocol_minor: PROTOCOL_MINOR,
             device_id: device_id.to_vec(),
             agent_build: "recovery-test".to_owned(),
             profile: Some(profile.clone()),
             capabilities: vec![capability],
             recoveries,
+            job_slots: 1,
         })),
     }
 }

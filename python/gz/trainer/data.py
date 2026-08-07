@@ -39,13 +39,13 @@ class TrainingStager:
         capacity: int,
         device: str | object,
         pinned_staging: bool = True,
-        validate_terminal_score: bool = False,
+        terminal_score_target: str | None = None,
     ) -> None:
         torch = _torch()
         self.schema = schema
         self.capacity = capacity
         self.device = torch.device(device)
-        self.validate_terminal_score = validate_terminal_score
+        self.terminal_score_target = terminal_score_target
         self._sets = [
             _StagerSet(schema, capacity, self.device, pinned_staging) for _ in range(2)
         ]
@@ -58,8 +58,14 @@ class TrainingStager:
             raise ValueError("row count mismatch")
         if batch.max_actions != targets.max_actions:
             raise ValueError("max action mismatch")
-        if self.validate_terminal_score:
+        if self.terminal_score_target == "node-count":
             _validate_terminal_scores(targets, self.schema.max_nodes)
+        elif self.terminal_score_target == "log1p-cost-ms":
+            _validate_terminal_costs(targets)
+        elif self.terminal_score_target is not None:
+            raise ValueError(
+                f"unknown terminal score target: {self.terminal_score_target}"
+            )
         staging = self._sets[self._index]
         self._index = 1 - self._index
         return staging.copy(batch, targets)
@@ -136,6 +142,15 @@ def _validate_terminal_scores(targets: TargetsView, max_nodes: int) -> None:
         raise ValueError("terminal score targets must be integral node counts")
     if ((terminal_nodes < 0.0) | (terminal_nodes > float(max_nodes))).any():
         raise ValueError("terminal score targets exceed feature schema bounds")
+
+
+def _validate_terminal_costs(targets: TargetsView) -> None:
+    valid = targets.horizon_value_valid[: targets.row_count] > 0
+    terminal_costs = -targets.reward[: targets.row_count][valid]
+    if not np.isfinite(terminal_costs).all():
+        raise ValueError("terminal cost targets must be finite")
+    if (terminal_costs < 0.0).any():
+        raise ValueError("terminal cost targets must be non-negative")
 
 
 def _torch():

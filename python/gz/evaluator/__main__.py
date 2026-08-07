@@ -17,6 +17,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--checkpoint-pointer")
     parser.add_argument("--device")
     parser.add_argument("--max-batch", type=int, default=1024)
+    parser.add_argument("--max-resident-model-generations", type=int, default=2)
     parser.add_argument("--no-compile", action="store_true")
     parser.add_argument("--poll-interval", type=float, default=10.0)
     args = parser.parse_args(argv)
@@ -33,6 +34,7 @@ def main(argv: list[str] | None = None) -> int:
                 device=args.device,
                 compile_model=not args.no_compile,
                 max_batch=args.max_batch,
+                max_resident_model_generations=args.max_resident_model_generations,
                 poll_interval=args.poll_interval,
             )
         else:

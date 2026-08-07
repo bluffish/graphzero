@@ -5,7 +5,7 @@ use super::super::{
 use super::root::{SymmetricRootResult, SymmetricSelfplayRootTask};
 use crate::support::internal;
 use crate::work::{
-    EngineIdentity, MeasureWork, SearchPoll, SearchWork, SearchWorkResult, WorkToken,
+    EngineIdentity, MeasurePairWork, SearchPoll, SearchWork, SearchWorkResult, WorkToken,
 };
 use gz_engine::{EngineResult, MeasureResult, ReplayGraphContext, SearchConfigHash};
 use std::collections::HashSet;
@@ -43,7 +43,7 @@ pub struct SymmetricSelfplayEpisodeTask<G, C> {
     releasable: GumbelHandleBatch<G, C>,
     next_token: u64,
     root_pending: Vec<RootPending>,
-    pending: Option<Pending<G>>,
+    pending: Option<Pending>,
     state: State<G, C>,
 }
 
@@ -206,21 +206,12 @@ where
                         }
                     }
                 }
-                State::MeasureP1 => {
+                State::MeasurePair => {
                     let token = self.next_token();
-                    self.pending = Some(Pending::MeasureP1 { token });
-                    return Ok(SearchPoll::Work(SearchWork::Measure(MeasureWork {
+                    self.pending = Some(Pending::MeasurePair { token });
+                    return Ok(SearchPoll::Work(SearchWork::MeasurePair(MeasurePairWork {
                         token,
-                        graph: self.actors[0].current,
-                        options: self.config.measure_options,
-                    })));
-                }
-                State::MeasureP2(p1_measure) => {
-                    let token = self.next_token();
-                    self.pending = Some(Pending::MeasureP2 { token, p1_measure });
-                    return Ok(SearchPoll::Work(SearchWork::Measure(MeasureWork {
-                        token,
-                        graph: self.actors[1].current,
+                        graphs: [self.actors[0].current, self.actors[1].current],
                         options: self.config.measure_options,
                     })));
                 }
@@ -264,23 +255,13 @@ where
             return Err(internal("unknown symmetric episode work token"));
         }
         match pending {
-            Pending::MeasureP1 { token } => match result {
-                SearchWorkResult::Measure(measure) => {
-                    self.state = State::MeasureP2(measure);
-                    Ok(())
-                }
-                _ => {
-                    self.pending = Some(Pending::MeasureP1 { token });
-                    Err(internal("mismatched symmetric P1 measure"))
-                }
-            },
-            Pending::MeasureP2 { token, p1_measure } => match result {
-                SearchWorkResult::Measure(p2_measure) => {
+            Pending::MeasurePair { token } => match result {
+                SearchWorkResult::MeasurePair([p1_measure, p2_measure]) => {
                     self.finish_episode(p1_measure, p2_measure)
                 }
                 _ => {
-                    self.pending = Some(Pending::MeasureP2 { token, p1_measure });
-                    Err(internal("mismatched symmetric P2 measure"))
+                    self.pending = Some(Pending::MeasurePair { token });
+                    Err(internal("mismatched symmetric measure pair"))
                 }
             },
         }
@@ -308,7 +289,7 @@ where
 
     fn start_turn(&mut self) -> EngineResult<()> {
         if !self.actor_active(GumbelPlayer::One) && !self.actor_active(GumbelPlayer::Two) {
-            self.state = State::MeasureP1;
+            self.state = State::MeasurePair;
             return Ok(());
         }
         if !self.actor_active(self.player) {
@@ -474,6 +455,10 @@ fn retokenize<G, C>(work: SearchWork<G, C>, token: WorkToken) -> SearchWork<G, C
             work.token = token;
             SearchWork::Measure(work)
         }
+        SearchWork::MeasurePair(mut work) => {
+            work.token = token;
+            SearchWork::MeasurePair(work)
+        }
         SearchWork::Eval(mut work) => {
             work.token = token;
             SearchWork::Eval(work)
@@ -533,27 +518,19 @@ impl<G: Copy, C> Actor<G, C> {
 enum State<G, C> {
     Turn,
     Root(SymmetricSelfplayRootTask<G, C>),
-    MeasureP1,
-    MeasureP2(MeasureResult<G>),
+    MeasurePair,
     DoneResult(Box<SymmetricEpisode<G, C>>),
     Done,
 }
 
-#[allow(clippy::large_enum_variant)]
-enum Pending<G> {
-    MeasureP1 {
-        token: WorkToken,
-    },
-    MeasureP2 {
-        token: WorkToken,
-        p1_measure: MeasureResult<G>,
-    },
+enum Pending {
+    MeasurePair { token: WorkToken },
 }
 
-impl<G> Pending<G> {
+impl Pending {
     fn token(&self) -> WorkToken {
         match self {
-            Self::MeasureP1 { token } | Self::MeasureP2 { token, .. } => *token,
+            Self::MeasurePair { token } => *token,
         }
     }
 }

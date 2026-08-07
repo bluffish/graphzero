@@ -1,0 +1,39 @@
+schema = "graphzero.compiler-deployment.v1"
+source_dir = "/opt/dlami/nvme/graphzero-artifacts/pi05-base-full-b1-source"
+inputs = "/opt/dlami/nvme/graphzero-artifacts/pi05-base-full-b1-workload/inputs.safetensors"
+references = "/opt/dlami/nvme/graphzero-artifacts/pi05-base-full-b1-workload/pytorch-reference.safetensors"
+cuda_python = "/usr/bin/python3"
+cuda_helper = "/home/ubuntu/graphs/rust/compiler/tools/nvidia_cuda_helper.py"
+device_ordinal = 0
+compute_capability_major = 12
+compute_capability_minor = 0
+performance_warmup_iterations = 1
+runtime_accuracy_verification = false
+measurement_pipeline_slots = 2
+# PI0.5 prepared states are large and terminal graphs are effectively unique.
+# Retain only the active/recent state in each compiler-engine lane.
+prepared_state_cache_capacity = 1
+evaluator_queue_capacity = 2
+evaluator_cache_capacity = 8
+candidate_mode = "end-to-end-nvidia-v5"
+case_id = "pi05-base-full-b1"
+execution_sequence = "sequence.pi05.inference"
+absolute_tolerance = 0.25
+relative_tolerance = 0.05
+compiler_build = "gz-compiler-measure-agent-sha256:31b7eedd9b9f6fd8ebf52bd3201d8a9b865cacffc30bff80da50d89c0c41ea58"
+runtime_build = "gz-compiler-measure-agent-sha256:31b7eedd9b9f6fd8ebf52bd3201d8a9b865cacffc30bff80da50d89c0c41ea58"
+
+[device_profile]
+platform_family = "nvidia-discrete"
+board_model = "NVIDIA RTX PRO 6000 Blackwell Server Edition"
+soc = "x86_64"
+gpu_architecture = "sm120"
+usable_memory_bytes = 102641958912
+operating_system_image = "ubuntu-24.04.4-lts-nvidia-driver-595.71.05"
+platform_release = "Ubuntu 24.04.4 LTS"
+cuda_version = "13.2.86"
+gpu_driver_version = "595.71.05"
+power_profile = "600W"
+clock_policy = "default-auto-persistence-enabled"
+cooling_policy = "server-managed"
+agent_image = "sha256:e1e9f409753f086421a677a0c067d4070edc6a9f2dee31155581d55845f34cef"

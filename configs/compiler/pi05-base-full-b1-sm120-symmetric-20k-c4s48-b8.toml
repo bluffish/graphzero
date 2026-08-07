@@ -1,0 +1,138 @@
+[arch]
+name = "gz-graph-v2"
+dim = 128
+layers = 4
+heads = 4
+ffn_dim = 512
+dropout = 0.1
+activation = "gelu"
+aggregation = "attention"
+global_tokens = 1
+state_input = "joint-board"
+trunk = "exphormer"
+sage_layers = 3
+policy_head = "pointer"
+value_input = "single"
+value_activation = "tanh"
+subject_encoding = "mean"
+position_encoding = "remaining_budget"
+action_encoding = "kind_prior"
+profile = "graphzero"
+value_hidden = 0
+value_head = "scalar"
+value_bins = 101
+value_min = -1.0
+value_max = 1.0
+value_sigma_ratio = 0.75
+auxiliary_heads = "v8-v32-score"
+
+[trainer]
+optimizer = "adamw"
+total_steps = 20000
+resume = false
+lr = 0.0002
+adamw_lr = 0.0002
+lr_schedule = "constant"
+warmup_steps = 250
+min_lr_ratio = 0.0
+batch = 4
+value_batch = 0
+window_rows = 30000
+value_window_rows = 0
+publish_interval = 32
+checkpoint_retain = 16
+permanent_checkpoint_interval = 250
+publish_lag_blocks = 0
+value_weight = 1.0
+value_trunk_grad_scale = 0.1
+value_final_weight = 0.5
+value_v8_weight = 0.2
+value_v32_weight = 0.2
+terminal_score_weight = 0.1
+terminal_score_target = "log1p-cost-ms"
+soft_policy_weight = 0.0
+soft_policy_temperature = 4.0
+soft_policy_trunk_grad_scale = 1.0
+weight_decay = 0.0001
+policy_init = "neutral"
+value_init = "zero"
+ema_decay = 0.0
+grad_clip = 10.0
+min_startup_rows = 768
+seed = 42
+model_seed = 5
+data_seed = 42
+device = "cuda:1"
+startup_timeout = 3600.0
+reconnect_limit = 5
+log_interval = 10
+step_sleep = 0.0
+min_available_gb = 40.0
+prefetch = true
+parallel_value_sampling = false
+compile_model = true
+compile_mode = "default"
+matmul_precision = "high"
+max_reuse = 8.0
+reuse_gate_interval = 1
+reuse_gate_episodes = 0
+init_checkpoint = ""
+init_checkpoint_scope = "all"
+
+[selfplay]
+lanes = 8
+workers_per_lane = 2
+simulations = 48
+max_considered = 4
+gumbel_scale = 1.0
+c_visit = 50.0
+c_scale = 1.0
+gumbel_noise_overlap = -1.0
+max_steps = 24
+max_candidates = 4352
+max_row_backlog = 8192
+replay_retain = 50000
+seed = 42
+eval_device = "cuda:0"
+eval_poll_interval = 2.0
+max_batch = 8
+python_dir = "python"
+position_features = true
+no_backtrack = true
+mask_stop = true
+symmetric_reward_tie_epsilon = 0.002
+eval_processes = 1
+admission_stagger_ms = 0
+admission_smoothing = false
+tree_reuse = true
+
+[engine]
+kind = "compiler"
+compiler_deployment = "configs/compiler/pi05-base-full-b1-sm120-performance-only-end-to-end-nvidia-v3.toml"
+compiler_max_nodes = 98304
+compiler_max_edges = 196608
+compiler_max_subjects = 24
+compiler_feature_layout = "compact-v1"
+measure_samples = 4
+
+[measurement]
+enabled = true
+listen = "0.0.0.0:50051"
+server_cert = "/opt/dlami/nvme/graphzero-measure-tls/bowen2/server.crt"
+server_key = "/opt/dlami/nvme/graphzero-measure-tls/bowen2/server.key"
+client_ca = "/opt/dlami/nvme/graphzero-measure-tls/bowen2/ca.crt"
+agents = [
+  "b02e0000000000000000000000000001=/opt/dlami/nvme/graphzero-measure-tls/bowen2/agent.crt",
+]
+receipt_dir = "/opt/dlami/nvme/graphzero-measure-receipts/pi05-base-full-b1-symmetric-20k-c4s48-b8-compact-v1-w16-bounds98k-v2"
+startup_timeout_ms = 900000
+
+[wandb]
+project = "graphzero"
+run_name = "compiler-pi05-base-full-b1-sm120-s42-m5-l24-w16-1m-end-to-end-nvidia-v3-c4s48-b8-reuse8-aux-v8-v32-score-nostop-eps2us-bounds98k-v2-20k-1"
+
+[paths]
+run_dir = "/opt/dlami/nvme/graphzero-runs/pi05-base-full-b1-symmetric-20k-c4s48-b8-compact-v1-w16-bounds98k-v2"
+replay_dir = "/opt/dlami/nvme/graphzero-replay/pi05-base-full-b1-symmetric-20k-c4s48-b8-compact-v1-w16-bounds98k-v2"
+sample_socket = "/tmp/gz-pi05-base-full-b1-symmetric-20k-c4s48-b8-compact-v1-w16-bounds98k-v2.sock"
+graphzero_bin = "target/release/graphzero"

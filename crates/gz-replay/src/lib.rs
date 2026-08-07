@@ -11,8 +11,9 @@ mod sample;
 mod store;
 
 pub use error::{ReplayError, ReplayResult};
-pub use records::{ReplayEpisodeId, ReplayEpisodeRecord, ReplayOutcome, ReplayRow};
+pub use records::{ReplayEpisodeId, ReplayEpisodeRecord, ReplayOutcome, ReplayRow, ReplayRowKind};
 pub use sample::SampleConfig;
 pub use store::{
-    ReplayContract, ReplayCounters, ReplayDataMode, ReplayStore, SymmetricSelfplayMetrics,
+    ReplayContract, ReplayCounters, ReplayDataMode, ReplayStore, SymmetricRewardTargetScale,
+    SymmetricRewardTieEpsilon, SymmetricSelfplayMetrics,
 };

@@ -21,6 +21,7 @@ class ArchConfig:
     ffn_dim: int = 512
     dropout: float = 0.1
     auxiliary_heads: str = "none"
+    policy_head: str = "pointer"
 
     name: ClassVar[str] = "gz-graph-v2"
     activation: ClassVar[str] = "gelu"
@@ -28,7 +29,6 @@ class ArchConfig:
     global_tokens: ClassVar[int] = 1
     state_input: ClassVar[str] = "joint-board"
     value_input: ClassVar[str] = "single"
-    policy_head: ClassVar[str] = "pointer"
     trunk: ClassVar[str] = "exphormer"
     sage_layers: ClassVar[int] = 3
     value_activation: ClassVar[str] = "tanh"
@@ -44,7 +44,15 @@ class ArchConfig:
     value_sigma_ratio: ClassVar[float] = 0.75
 
     _RUNTIME_FIELDS: ClassVar[frozenset[str]] = frozenset(
-        {"dim", "layers", "heads", "ffn_dim", "dropout", "auxiliary_heads"}
+        {
+            "dim",
+            "layers",
+            "heads",
+            "ffn_dim",
+            "dropout",
+            "auxiliary_heads",
+            "policy_head",
+        }
     )
     _FIXED_FIELDS: ClassVar[dict[str, object]] = {
         "name": name,
@@ -53,7 +61,6 @@ class ArchConfig:
         "global_tokens": global_tokens,
         "state_input": state_input,
         "value_input": value_input,
-        "policy_head": policy_head,
         "trunk": trunk,
         "sage_layers": sage_layers,
         "value_activation": value_activation,
@@ -83,6 +90,8 @@ class ArchConfig:
             "v8-v32-score-soft-policy-v2",
         }:
             raise ValueError("unsupported auxiliary_heads")
+        if self.policy_head not in {"pointer", "factorized-pointer"}:
+            raise ValueError("unsupported policy_head")
 
     def to_manifest_dict(self) -> dict[str, object]:
         return {
@@ -152,6 +161,7 @@ class ArchConfig:
                 "auxiliary_heads",
                 defaults.auxiliary_heads,
             ),
+            policy_head=_str(value, "policy_head", defaults.policy_head),
         )
 
     @classmethod
@@ -163,6 +173,7 @@ class ArchConfig:
             ffn_dim=_int(value, "ffn_dim"),
             dropout=_float(value, "dropout"),
             auxiliary_heads=_str(value, "auxiliary_heads"),
+            policy_head=_str(value, "policy_head"),
         )
 
     @classmethod
@@ -182,6 +193,9 @@ def initialize_policy(model: object, mode: str) -> None:
     if mode != "neutral":
         raise ValueError(f"unsupported policy initializer: {mode}")
     _torch().nn.init.zeros_(model.policy.pointer_key.weight)
+    family_key = getattr(model.policy, "family_key", None)
+    if family_key is not None:
+        _torch().nn.init.zeros_(family_key.weight)
 
 
 def initialize_value(model: object, mode: str) -> None:
@@ -311,7 +325,7 @@ class BatchStager:
         self.action_kind.cpu[..., 0] = 1
         self.action_prior.zero_()
         self.subject_count.zero_()
-        self.action_subjects.fill_(0xFFFF)
+        self.action_subjects.fill_(-1)
         self.position.zero_()
         self.opponent_state_present.zero_()
         self.opponent_node_count.zero_()

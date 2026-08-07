@@ -56,7 +56,7 @@ def test_attr1_fixture_matches_spec_table() -> None:
     assert view.action_prior.tolist()[2] == [-0.5, 0.0, 1.0, 0.125, -1.0, 0.0]
     assert view.subject_count.tolist()[0] == [1, 0, 0, 0, 0, 0]
     assert view.subject_count.tolist()[2] == [2, 0, 1, 2, 1, 0]
-    assert view.action_subjects[0, 0].tolist() == [2, 0xFFFF]
+    assert view.action_subjects[0, 0].tolist() == [2, 0xFFFF_FFFF]
     assert view.action_subjects[2, 0].tolist() == [0, 1]
     assert view.action_subjects[2, 3].tolist() == [2, 3]
     assert view.position.tolist() == [
@@ -88,7 +88,7 @@ def test_attr0_fixture_omits_attrs() -> None:
     assert view.action_kind.tolist()[0] == [4, 1, 0]
     assert view.action_prior.tolist()[0] == [0.5, 0.0, 0.0]
     assert view.subject_count.tolist()[0] == [1, 0, 0]
-    assert view.action_subjects[0, 0].tolist() == [1, 0xFFFF]
+    assert view.action_subjects[0, 0].tolist() == [1, 0xFFFF_FFFF]
     assert view.position.tolist()[0] == [0.0, 1.0, 0.25, 0.25]
     assert view.opponent_reward.tolist() == [0.0, 0.0]
     assert view.opponent_present.tolist() == [0, 0]

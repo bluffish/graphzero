@@ -1,0 +1,8 @@
+extends = "qwen3-0.6b-prefill-b1s128-sm120-symmetric-5k-fast-end-to-end-nvidia-v3-centered-policy-eps2us-stop-c4s48-b32.toml"
+
+[trainer]
+total_steps = 100000
+resume = true
+
+[wandb]
+run_id = "ux1bnzuu"

@@ -1,6 +1,7 @@
+use crate::measurement::RemoteMeasurePayload;
 use crate::root::RootSource;
 use crate::{EpisodeId, internal};
-use gz_engine::{EngineResult, GraphEngine, MeasureOptions, MeasureResult};
+use gz_engine::{EngineResult, GraphEngine, MeasureResult};
 use gz_eval::EvalOutput;
 use gz_features::{FeatureExtractor, FeatureRow, PositionFeatures};
 use gz_search::{
@@ -34,8 +35,7 @@ pub(crate) struct ParkedEval {
 pub(crate) struct ParkedMeasure<G> {
     pub slot: usize,
     pub token: WorkToken,
-    pub graph: G,
-    pub options: MeasureOptions,
+    pub payload: RemoteMeasurePayload<G>,
 }
 
 pub(crate) struct Admission<'a> {
@@ -82,8 +82,7 @@ struct ParkedEvalState {
 
 struct ParkedMeasureState<G> {
     token: WorkToken,
-    graph: G,
-    options: MeasureOptions,
+    payload: RemoteMeasurePayload<G>,
     sent: bool,
 }
 
@@ -269,7 +268,8 @@ where
                                     position,
                                 ) {
                                     Ok(row) => row,
-                                    Err(_) => {
+                                    Err(error) => {
+                                        eprintln!("event=feature_error role=actor error={error}");
                                         release_task_all(engine, &mut episode.task)?;
                                         return Err(internal("feature extraction failed"));
                                     }
@@ -284,7 +284,10 @@ where
                                         opponent_position,
                                     ) {
                                         Ok(row) => row,
-                                        Err(_) => {
+                                        Err(error) => {
+                                            eprintln!(
+                                                "event=feature_error role=opponent error={error}"
+                                            );
                                             release_task_all(engine, &mut episode.task)?;
                                             return Err(internal(
                                                 "opponent feature extraction failed",
@@ -307,8 +310,24 @@ where
                                 }
                                 parked_measure = Some(ParkedMeasureState {
                                     token,
-                                    graph: work.graph,
-                                    options: work.options,
+                                    payload: RemoteMeasurePayload::Single {
+                                        graph: work.graph,
+                                        options: work.options,
+                                    },
+                                    sent: false,
+                                });
+                            }
+                            SearchWork::MeasurePair(work) if remote_measure => {
+                                if parked_measure.is_some() || !parked_evals.is_empty() {
+                                    release_task_all(engine, &mut episode.task)?;
+                                    return Err(internal("worker produced overlapping work"));
+                                }
+                                parked_measure = Some(ParkedMeasureState {
+                                    token,
+                                    payload: RemoteMeasurePayload::Pair {
+                                        graphs: work.graphs,
+                                        options: work.options,
+                                    },
                                     sent: false,
                                 });
                             }
@@ -388,8 +407,7 @@ where
             parked.push(ParkedMeasure {
                 slot,
                 token: measure.token,
-                graph: measure.graph,
-                options: measure.options,
+                payload: measure.payload,
             });
         }
         parked
@@ -454,6 +472,45 @@ where
     where
         E: GraphEngine<Graph = G, Candidate = C>,
     {
+        self.resume_terminal_measure(
+            engine,
+            slot_index,
+            token,
+            false,
+            result.map(SearchWorkResult::Measure),
+        )
+    }
+
+    pub(crate) fn resume_measure_pair<E>(
+        &mut self,
+        engine: &mut E,
+        slot_index: usize,
+        token: WorkToken,
+        result: EngineResult<[MeasureResult<G>; 2]>,
+    ) -> EngineResult<()>
+    where
+        E: GraphEngine<Graph = G, Candidate = C>,
+    {
+        self.resume_terminal_measure(
+            engine,
+            slot_index,
+            token,
+            true,
+            result.map(SearchWorkResult::MeasurePair),
+        )
+    }
+
+    fn resume_terminal_measure<E>(
+        &mut self,
+        engine: &mut E,
+        slot_index: usize,
+        token: WorkToken,
+        expect_pair: bool,
+        result: EngineResult<SearchWorkResult<G, C>>,
+    ) -> EngineResult<()>
+    where
+        E: GraphEngine<Graph = G, Candidate = C>,
+    {
         let slot = self
             .slots
             .get_mut(slot_index)
@@ -476,6 +533,13 @@ where
         {
             return Err(internal("measure reply for different pending work"));
         }
+        let actual_pair = matches!(
+            measure.as_ref().expect("pending measure exists").payload,
+            RemoteMeasurePayload::Pair { .. }
+        );
+        if actual_pair != expect_pair {
+            return Err(internal("measure reply shape mismatch"));
+        }
         let output = match result {
             Ok(output) => output,
             Err(error) => {
@@ -485,10 +549,7 @@ where
             }
         };
         *measure = None;
-        if let Err(error) = episode
-            .task
-            .resume(token, SearchWorkResult::Measure(output))
-        {
+        if let Err(error) = episode.task.resume(token, output) {
             release_task_all(engine, &mut episode.task)?;
             slot.state = SlotState::Idle;
             return Err(error);
@@ -600,6 +661,12 @@ where
         SearchWork::Measure(work) => engine
             .measure(work.graph, work.options)
             .map(|result| Some(SearchWorkResult::Measure(result))),
+        SearchWork::MeasurePair(_) if remote_measure => Ok(None),
+        SearchWork::MeasurePair(work) => {
+            let first = engine.measure(work.graphs[0], work.options)?;
+            let second = engine.measure(work.graphs[1], work.options)?;
+            Ok(Some(SearchWorkResult::MeasurePair([first, second])))
+        }
         SearchWork::Eval(_) => Ok(None),
         _ => Err(internal("unsupported search work")),
     }

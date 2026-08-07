@@ -30,6 +30,8 @@ def test_arch_round_trip_and_fixed_runtime_contract() -> None:
         auxiliary_heads="v8-v32-score-soft-policy-v2",
     )
     assert ArchConfig.from_manifest_dict(soft_policy_arch.to_manifest_dict()) == soft_policy_arch
+    factorized_arch = replace(arch, policy_head="factorized-pointer")
+    assert ArchConfig.from_manifest_dict(factorized_arch.to_manifest_dict()) == factorized_arch
     legacy_soft_policy_arch = replace(
         soft_policy_arch,
         auxiliary_heads="v8-v32-score-soft-policy",
@@ -72,6 +74,150 @@ def test_forward_is_finite_bounded_and_split_entrypoints_match() -> None:
     assert logits.abs().max() <= 10.0
     torch.testing.assert_close(policy, logits, rtol=0, atol=0)
     torch.testing.assert_close(value, values, rtol=0, atol=0)
+
+
+def test_pointer_policy_ignores_common_raw_score_offset() -> None:
+    _, _, model, _ = model_fixture()
+    dim = model.arch.dim
+    board = torch.zeros((1, dim))
+    board[0, 0] = dim**0.5
+    tokens = torch.zeros((1, 3, dim))
+    tokens[0, :, 0] = torch.tensor([-0.25, 0.0, 0.5])
+    action_mask = torch.ones((1, 3), dtype=torch.bool)
+    identity = torch.nn.Identity()
+
+    logits = model.policy._pointer_logits(board, tokens, identity, action_mask)
+    shifted = tokens.clone()
+    shifted[0, :, 0] += 5.0
+    shifted_logits = model.policy._pointer_logits(
+        board,
+        shifted,
+        identity,
+        action_mask,
+    )
+    torch.testing.assert_close(
+        torch.softmax(shifted_logits, dim=-1),
+        torch.softmax(logits, dim=-1),
+        rtol=1e-6,
+        atol=1e-7,
+    )
+
+
+def test_factorized_policy_does_not_reward_a_family_for_duplicate_candidates() -> None:
+    _, schema, _, _ = model_fixture()
+    model = build_model(schema, replace(small_arch(), policy_head="factorized-pointer"))
+    head = model.policy.eval()
+    dim = model.arch.dim
+    feat_dim = head.token_proj.in_features
+    readout = torch.randn((1, dim))
+    family_action = torch.randn((feat_dim,))
+    other_action = torch.randn((feat_dim,))
+
+    two_actions = torch.stack((family_action, other_action)).unsqueeze(0)
+    two_kinds = torch.tensor([[2, 3]])
+    two_mask = torch.ones((1, 2), dtype=torch.bool)
+    duplicated = torch.stack(
+        (family_action, family_action, family_action, other_action)
+    ).unsqueeze(0)
+    duplicated_kinds = torch.tensor([[2, 2, 2, 3]])
+    duplicated_mask = torch.ones((1, 4), dtype=torch.bool)
+
+    with torch.no_grad():
+        two_policy = torch.softmax(
+            head(readout, two_actions, two_kinds, two_mask),
+            dim=-1,
+        )
+        duplicated_policy = torch.softmax(
+            head(readout, duplicated, duplicated_kinds, duplicated_mask),
+            dim=-1,
+        )
+
+    torch.testing.assert_close(
+        duplicated_policy[0, :3].sum(),
+        two_policy[0, 0],
+        rtol=1e-5,
+        atol=1e-6,
+    )
+    torch.testing.assert_close(
+        duplicated_policy[0, 3],
+        two_policy[0, 1],
+        rtol=1e-5,
+        atol=1e-6,
+    )
+
+
+def test_factorized_policy_trains_family_and_conditional_scores() -> None:
+    _, schema, _, _ = model_fixture()
+    model = build_model(schema, replace(small_arch(), policy_head="factorized-pointer"))
+    head = model.policy
+    dim = model.arch.dim
+    feat_dim = head.token_proj.in_features
+    logits = head(
+        torch.randn((1, dim)),
+        torch.randn((1, 3, feat_dim)),
+        torch.tensor([[2, 2, 3]]),
+        torch.ones((1, 3), dtype=torch.bool),
+    )
+    torch.nn.functional.cross_entropy(logits, torch.tensor([0])).backward()
+
+    assert head.family_key.weight.grad is not None
+    assert head.family_key.weight.grad.abs().sum() > 0
+    assert head.pointer_key.weight.grad is not None
+    assert head.pointer_key.weight.grad.abs().sum() > 0
+
+
+def test_factorized_conditional_scores_accept_mixed_precision_family_counts() -> None:
+    _, schema, _, _ = model_fixture()
+    model = build_model(schema, replace(small_arch(), policy_head="factorized-pointer"))
+    head = model.policy
+    dim = model.arch.dim
+    logits = head._conditional_logits(
+        torch.randn((1, dim)),
+        torch.randn((1, 3, dim)),
+        torch.tensor([[2, 2, 3]]),
+        torch.ones((1, 3), dtype=torch.bool),
+        torch.tensor(
+            [[0, 0, 2, 1, 0, 0, 0, 0]],
+            dtype=torch.bfloat16,
+        ),
+    )
+
+    assert logits.dtype == torch.float32
+    assert torch.isfinite(logits).all()
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="CUDA is unavailable")
+def test_factorized_policy_supports_cuda_bfloat16_autocast() -> None:
+    _, schema, _, _ = model_fixture()
+    model = build_model(
+        schema,
+        replace(small_arch(), policy_head="factorized-pointer"),
+    ).cuda()
+    initialize_policy(model, "neutral")
+    head = torch.compile(model.policy, fullgraph=True, dynamic=False)
+    dim = model.arch.dim
+    feat_dim = head.token_proj.in_features
+    action_count = 271
+    kinds = torch.full((1, action_count), 2, device="cuda", dtype=torch.long)
+    kinds[:, -1] = 3
+    with torch.autocast("cuda", dtype=torch.bfloat16):
+        logits = head(
+            torch.randn((1, dim), device="cuda"),
+            torch.randn((1, action_count, feat_dim), device="cuda"),
+            kinds,
+            torch.ones((1, action_count), dtype=torch.bool, device="cuda"),
+        )
+        loss = torch.nn.functional.cross_entropy(
+            logits,
+            torch.tensor([0], device="cuda"),
+        )
+    loss.backward()
+
+    assert torch.isfinite(logits).all()
+    assert all(
+        parameter.grad is None or torch.isfinite(parameter.grad).all()
+        for parameter in head.parameters()
+    )
 
 
 def test_joint_board_conditions_both_heads_on_opponent_state() -> None:

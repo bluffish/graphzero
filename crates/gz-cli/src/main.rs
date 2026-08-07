@@ -1,9 +1,13 @@
 #![forbid(unsafe_code)]
 
+use gz_cli::compiler_inventory::{
+    CompilerInventoryConfig, inventory as inventory_compiler_features,
+};
 use gz_cli::distill::{DistillGenerateConfig, generate as generate_distill};
 use gz_cli::remote_measure::RemoteAgentEnrollment;
 use gz_cli::selfplay::{ReplayInitConfig, SelfplayConfig, init_replay, run};
 use gz_measure_service::DeviceId;
+use gz_replay::{SymmetricRewardTargetScale, SymmetricRewardTieEpsilon};
 
 // glibc malloc is pathological for this binary either way: default
 // per-thread arenas retain ~17 MB/s of fragmentation across ~300 threads,
@@ -66,6 +70,23 @@ fn main() {
                     summary.states as f64 / summary.elapsed.as_secs_f64().max(f64::EPSILON),
                 );
             }),
+        "compiler-inventory" => parse_compiler_inventory(args.collect())
+            .and_then(inventory_compiler_features)
+            .map(|summary| {
+                println!(
+                    "states={} root_actions={} observed nodes={} edges={} actions={} subjects={} recommended nodes={} edges={} actions={} subjects={}",
+                    summary.states,
+                    summary.root_actions,
+                    summary.max_nodes,
+                    summary.max_edges,
+                    summary.max_actions,
+                    summary.max_subjects,
+                    summary.recommended_max_nodes,
+                    summary.recommended_max_edges,
+                    summary.recommended_max_actions,
+                    summary.recommended_max_subjects,
+                );
+            }),
         "replay-serve" => parse_replay_serve(args.collect()).and_then(run_replay_serve),
         _ => Err(format!("unknown command: {command}\n{}", usage())),
     };
@@ -74,6 +95,44 @@ fn main() {
         eprintln!("{error}");
         std::process::exit(1);
     }
+}
+
+fn parse_compiler_inventory(args: Vec<String>) -> Result<CompilerInventoryConfig, String> {
+    let mut deployment = None;
+    let mut feature_layout = Default::default();
+    let mut validate_root_actions = true;
+    let mut rollouts = 256;
+    let mut max_steps = 24;
+    let mut seed = 0;
+    let mut index = 0;
+    while index < args.len() {
+        let flag = &args[index];
+        index += 1;
+        let Some(value) = args.get(index) else {
+            return Err(format!("missing value for {flag}\n{}", usage()));
+        };
+        index += 1;
+        match flag.as_str() {
+            "--deployment" => deployment = Some(PathBuf::from(value)),
+            "--compiler-feature-layout" => feature_layout = value.parse()?,
+            "--validate-root-actions" => validate_root_actions = parse_bool(flag, value)?,
+            "--rollouts" => rollouts = parse_usize(flag, value)?,
+            "--max-steps" => max_steps = parse_usize(flag, value)?,
+            "--seed" => seed = parse_u64(flag, value)?,
+            _ => return Err(format!("unknown flag: {flag}\n{}", usage())),
+        }
+    }
+    let config = CompilerInventoryConfig {
+        deployment: deployment
+            .ok_or_else(|| format!("missing required --deployment\n{}", usage()))?,
+        feature_layout,
+        validate_root_actions,
+        rollouts,
+        max_steps,
+        seed,
+    };
+    config.validate()?;
+    Ok(config)
 }
 
 fn parse_distill_generate(args: Vec<String>) -> Result<DistillGenerateConfig, String> {
@@ -119,9 +178,32 @@ fn parse_replay_init(args: Vec<String>) -> Result<ReplayInitConfig, String> {
         index += 1;
 
         match flag.as_str() {
+            "--engine" => config.engine.kind = value.parse()?,
+            "--compiler-deployment" => {
+                config.engine.compiler_deployment = Some(PathBuf::from(value));
+            }
+            "--compiler-max-nodes" => {
+                config.engine.compiler_max_nodes = Some(parse_u32(flag, value)?);
+            }
+            "--compiler-max-edges" => {
+                config.engine.compiler_max_edges = Some(parse_u32(flag, value)?);
+            }
+            "--compiler-max-subjects" => {
+                config.engine.compiler_max_subjects = Some(parse_u32(flag, value)?);
+            }
+            "--compiler-feature-layout" => {
+                config.engine.compiler_feature_layout = value.parse()?;
+            }
+            "--measure-samples" => config.engine.measure_samples = parse_u32(flag, value)?,
             "--replay-dir" => config.replay_dir = Some(PathBuf::from(value)),
             "--max-candidates" => config.max_candidates = parse_usize(flag, value)?,
             "--mask-stop" => config.mask_stop = parse_bool(flag, value)?,
+            "--symmetric-reward-tie-epsilon" => {
+                config.reward_tie_epsilon = parse_symmetric_reward_tie_epsilon(flag, value)?;
+            }
+            "--symmetric-reward-target-scale" => {
+                config.reward_target_scale = parse_symmetric_reward_target_scale(flag, value)?;
+            }
             _ => return Err(format!("unknown flag: {flag}\n{}", usage())),
         }
     }
@@ -178,6 +260,23 @@ fn parse_selfplay(args: Vec<String>) -> Result<SelfplayConfig, String> {
         index += 1;
 
         match flag.as_str() {
+            "--engine" => config.engine.kind = value.parse()?,
+            "--compiler-deployment" => {
+                config.engine.compiler_deployment = Some(PathBuf::from(value));
+            }
+            "--compiler-max-nodes" => {
+                config.engine.compiler_max_nodes = Some(parse_u32(flag, value)?);
+            }
+            "--compiler-max-edges" => {
+                config.engine.compiler_max_edges = Some(parse_u32(flag, value)?);
+            }
+            "--compiler-max-subjects" => {
+                config.engine.compiler_max_subjects = Some(parse_u32(flag, value)?);
+            }
+            "--compiler-feature-layout" => {
+                config.engine.compiler_feature_layout = value.parse()?;
+            }
+            "--measure-samples" => config.engine.measure_samples = parse_u32(flag, value)?,
             "--replay-dir" => config.replay_dir = Some(PathBuf::from(value)),
             "--episodes" => config.episodes = parse_u64(flag, value)?,
             "--lanes" => config.lanes = parse_usize(flag, value)?,
@@ -189,6 +288,9 @@ fn parse_selfplay(args: Vec<String>) -> Result<SelfplayConfig, String> {
             "--eval-device" => config.eval_device = Some(value.clone()),
             "--eval-poll-interval" => {
                 config.eval_poll_interval = Some(parse_f32(flag, value)?);
+            }
+            "--eval-max-resident-model-generations" => {
+                config.eval_max_resident_model_generations = parse_usize(flag, value)?;
             }
             "--seed" => config.seed = parse_u64(flag, value)?,
             "--max-steps" => config.max_steps = parse_usize(flag, value)?,
@@ -208,6 +310,12 @@ fn parse_selfplay(args: Vec<String>) -> Result<SelfplayConfig, String> {
             "--position-features" => config.position_features = parse_bool(flag, value)?,
             "--no-backtrack" => config.no_backtrack = parse_bool(flag, value)?,
             "--mask-stop" => config.mask_stop = parse_bool(flag, value)?,
+            "--symmetric-reward-tie-epsilon" => {
+                config.reward_tie_epsilon = parse_symmetric_reward_tie_epsilon(flag, value)?;
+            }
+            "--symmetric-reward-target-scale" => {
+                config.reward_target_scale = parse_symmetric_reward_target_scale(flag, value)?;
+            }
             "--eval-processes" => config.eval_processes = parse_usize(flag, value)?,
             "--admission-stagger-ms" => config.admission_stagger_ms = parse_u64(flag, value)?,
             "--admission-smoothing" => config.admission_smoothing = parse_bool(flag, value)?,
@@ -265,10 +373,32 @@ fn parse_usize(flag: &str, value: &str) -> Result<usize, String> {
         .map_err(|_| format!("{flag} expects a positive integer"))
 }
 
+fn parse_u32(flag: &str, value: &str) -> Result<u32, String> {
+    value
+        .parse()
+        .map_err(|_| format!("{flag} expects an unsigned 32-bit integer"))
+}
+
 fn parse_f32(flag: &str, value: &str) -> Result<f32, String> {
     value
         .parse()
         .map_err(|_| format!("{flag} expects a number"))
+}
+
+fn parse_symmetric_reward_tie_epsilon(
+    flag: &str,
+    value: &str,
+) -> Result<SymmetricRewardTieEpsilon, String> {
+    SymmetricRewardTieEpsilon::new(parse_f32(flag, value)?)
+        .ok_or_else(|| format!("{flag} must be finite and non-negative"))
+}
+
+fn parse_symmetric_reward_target_scale(
+    flag: &str,
+    value: &str,
+) -> Result<SymmetricRewardTargetScale, String> {
+    SymmetricRewardTargetScale::new(parse_f32(flag, value)?)
+        .ok_or_else(|| format!("{flag} must be finite and non-negative"))
 }
 
 fn parse_bool(flag: &str, value: &str) -> Result<bool, String> {
@@ -280,5 +410,5 @@ fn parse_bool(flag: &str, value: &str) -> Result<bool, String> {
 }
 
 fn usage() -> &'static str {
-    "usage: graphzero selfplay --replay-dir PATH [--episodes N; 0 = unbounded] [--lanes L] [--workers-per-lane W] [--evaluator stub|process-stub|torch] [--python-dir PATH] [--checkpoint-dir DIR] [--checkpoint-pointer FILE] [--eval-device DEV] [--eval-poll-interval SECS] [--seed S] [--max-steps M] [--simulations K] [--max-considered M] [--gumbel-scale G] [--c-visit C] [--c-scale C] [--gumbel-noise-overlap V; negative disables] [--tree-reuse true|false] [--max-candidates N] [--max-batch B] [--serve-socket PATH] [--serve-max-batch B] [--replay-backlog ROWS] [--replay-retain ROWS] [--position-features true|false] [--no-backtrack true|false] [--mask-stop true|false] [--eval-processes N] [--admission-stagger-ms MS] [--admission-smoothing true|false] [--measure-listen HOST:PORT --measure-server-cert PATH --measure-server-key PATH --measure-client-ca PATH --measure-agent DEVICE_ID=CERT_PATH ... --measure-profile NAME --measure-receipt-dir PATH --measure-startup-timeout-ms MS]\n       graphzero replay-init --replay-dir PATH [--max-candidates N]\n       graphzero distill-generate --replay-dir PATH [--states N] [--workers N] [--max-attempts N; 0 = 10x states] [--teacher reducing-uniform] [--seed S] [--max-candidates N] [--max-steps N] [--position-features true|false]\n       graphzero replay-serve --replay-dir PATH --socket PATH --max-batch B"
+    "usage: graphzero selfplay --replay-dir PATH [--engine whittle|compiler] [--compiler-deployment PATH --compiler-feature-layout expanded-ports|compact-v1 --compiler-max-nodes N --compiler-max-edges N --compiler-max-subjects N] [--measure-samples N] [--episodes N; 0 = unbounded] [--lanes L] [--workers-per-lane W] [--evaluator stub|process-stub|torch] [--python-dir PATH] [--checkpoint-dir DIR] [--checkpoint-pointer FILE] [--eval-device DEV[,DEV...]] [--eval-poll-interval SECS] [--eval-max-resident-model-generations N] [--seed S] [--max-steps M] [--simulations K] [--max-considered M] [--gumbel-scale G] [--c-visit C] [--c-scale C] [--gumbel-noise-overlap V; negative disables] [--tree-reuse true|false] [--max-candidates N] [--max-batch B] [--serve-socket PATH] [--serve-max-batch B] [--replay-backlog ROWS] [--replay-retain ROWS] [--position-features true|false] [--no-backtrack true|false] [--mask-stop true|false] [--symmetric-reward-tie-epsilon E] [--symmetric-reward-target-scale S] [--eval-processes N] [--admission-stagger-ms MS] [--admission-smoothing true|false] [--measure-listen HOST:PORT --measure-server-cert PATH --measure-server-key PATH --measure-client-ca PATH --measure-agent DEVICE_ID=CERT_PATH ... --measure-profile NAME --measure-receipt-dir PATH --measure-startup-timeout-ms MS]\n       graphzero replay-init --replay-dir PATH [--engine whittle|compiler] [--compiler-deployment PATH --compiler-feature-layout expanded-ports|compact-v1 --compiler-max-nodes N --compiler-max-edges N --compiler-max-subjects N] [--max-candidates N] [--symmetric-reward-tie-epsilon E] [--symmetric-reward-target-scale S]\n       graphzero compiler-inventory --deployment PATH [--compiler-feature-layout expanded-ports|compact-v1] [--rollouts N] [--max-steps N] [--seed S]\n       graphzero distill-generate --replay-dir PATH [--states N] [--workers N] [--max-attempts N; 0 = 10x states] [--teacher reducing-uniform] [--seed S] [--max-candidates N] [--max-steps N] [--position-features true|false]\n       graphzero replay-serve --replay-dir PATH --socket PATH --max-batch B"
 }

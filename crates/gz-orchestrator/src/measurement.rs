@@ -1,4 +1,4 @@
-use crate::lanes::{LaneReply, MeasureReply};
+use crate::lanes::{LaneReply, MeasurePairReply, MeasureReply};
 use gz_engine::{EngineError, EngineResult, ErrorCode, ErrorMessage, GraphEngine, MeasureOptions};
 use gz_measure_service::{CoordinatorHandle, MeasureSubmission};
 use gz_search::WorkToken;
@@ -12,6 +12,16 @@ pub trait MeasureSubmissionEncoder<E: GraphEngine>: Send + Sync {
         graph: E::Graph,
         options: MeasureOptions,
     ) -> EngineResult<MeasureSubmission>;
+
+    fn encode_pair(
+        &self,
+        engine: &E,
+        graphs: [E::Graph; 2],
+        options: MeasureOptions,
+    ) -> EngineResult<MeasureSubmission> {
+        self.encode(engine, graphs[0], options)?
+            .into_symmetric_pair(engine, graphs[1])
+    }
 }
 
 impl<E, F> MeasureSubmissionEncoder<E> for F
@@ -47,12 +57,23 @@ impl<E: GraphEngine> RemoteMeasurementRuntime<E> {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub(crate) enum RemoteMeasurePayload<G> {
+    Single {
+        graph: G,
+        options: MeasureOptions,
+    },
+    Pair {
+        graphs: [G; 2],
+        options: MeasureOptions,
+    },
+}
+
 pub(crate) struct RemoteMeasureJob<G> {
     pub lane: usize,
     pub slot: usize,
     pub token: WorkToken,
-    pub graph: G,
-    pub options: MeasureOptions,
+    pub payload: RemoteMeasurePayload<G>,
     pub submission: MeasureSubmission,
 }
 
@@ -87,18 +108,39 @@ where
                     let coordinator = coordinator.clone();
                     let reply_tx = reply_txs[job.lane].clone();
                     pending.spawn(async move {
-                        let result = coordinator
+                        let committed = coordinator
                             .measure(job.submission)
                             .await
-                            .map_err(|error| remote_error(error.to_string()))
-                            .and_then(|committed| {
-                                committed.into_measure_result(job.graph, job.options)
-                            });
-                        let _ = reply_tx.send(LaneReply::Measure(MeasureReply {
-                            slot: job.slot,
-                            token: job.token,
-                            result,
-                        }));
+                            .map_err(|error| remote_error(error.to_string()));
+                        if let Err(error) = &committed {
+                            eprintln!(
+                                "event=measure_error lane={} slot={} error={error}",
+                                job.lane, job.slot
+                            );
+                        }
+                        let reply = match job.payload {
+                            RemoteMeasurePayload::Single { graph, options } => {
+                                let result = committed.and_then(|committed| {
+                                    committed.into_measure_result(graph, options)
+                                });
+                                LaneReply::Measure(MeasureReply {
+                                    slot: job.slot,
+                                    token: job.token,
+                                    result,
+                                })
+                            }
+                            RemoteMeasurePayload::Pair { graphs, options } => {
+                                let result = committed.and_then(|committed| {
+                                    committed.into_measure_pair_results(graphs, options)
+                                });
+                                LaneReply::MeasurePair(MeasurePairReply {
+                                    slot: job.slot,
+                                    token: job.token,
+                                    result,
+                                })
+                            }
+                        };
+                        let _ = reply_tx.send(reply);
                     });
                 }
             }

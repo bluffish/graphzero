@@ -1,5 +1,5 @@
-// v8: replay rows may carry fixed V8/V32 horizon-value targets.
-pub(crate) const SCHEMA_VERSION: u32 = 8;
+// v9: replay rows distinguish policy-bearing decisions from value-only terminals.
+pub(crate) const SCHEMA_VERSION: u32 = 9;
 
 pub(crate) const CF_META: &str = "meta";
 pub(crate) const CF_EPISODES: &str = "episodes";
@@ -19,6 +19,8 @@ pub(crate) const META_DELETED_FLOOR: &[u8] = b"deleted_floor";
 pub(crate) const META_FEATURE_SCHEMA: &[u8] = b"feature_schema";
 pub(crate) const META_ENGINE_IDENTITY: &[u8] = b"engine_identity";
 pub(crate) const META_DATA_MODE: &[u8] = b"data_mode";
+pub(crate) const META_SYMMETRIC_REWARD_TIE_EPSILON: &[u8] = b"symmetric_reward_tie_epsilon";
+pub(crate) const META_SYMMETRIC_REWARD_TARGET_SCALE: &[u8] = b"symmetric_reward_target_scale";
 pub(crate) const META_TERMINAL_COST_EMA: &[u8] = b"terminal_cost_ema";
 pub(crate) const META_TERMINAL_COST_BEST: &[u8] = b"terminal_cost_best";
 pub(crate) const META_SYMMETRIC_GAMES: &[u8] = b"symmetric_games";

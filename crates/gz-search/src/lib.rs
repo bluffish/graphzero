@@ -33,7 +33,7 @@ pub use gumbel::{
 pub use hash::{
     beam_search_config_hash, greedy_search_config_hash, gumbel_search_config_hash,
     puct_search_config_hash, reducing_uniform_distill_config_hash,
-    symmetric_selfplay_search_config_hash,
+    symmetric_selfplay_search_config_hash, trajectory_distill_config_hash,
 };
 pub use mcts::MctsHandleBatch;
 pub use puct::{
@@ -42,5 +42,5 @@ pub use puct::{
 };
 pub use work::{
     ApplyWork, EvalOpponentWork, EvalWork, ExpandResult, ExpandWork, ExpandedCandidate,
-    MeasureWork, SearchPoll, SearchWork, SearchWorkResult, WorkToken,
+    MeasurePairWork, MeasureWork, SearchPoll, SearchWork, SearchWorkResult, WorkToken,
 };

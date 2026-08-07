@@ -13,7 +13,7 @@ from gz.common import (
 )
 from gz.proto import ENCODING_VERSION
 
-SAMPLE_PROTOCOL_VERSION = 12
+SAMPLE_PROTOCOL_VERSION = 13
 HELLO_ACK_FIXED_LEN = 224
 
 FRAME_HELLO = 1
@@ -23,7 +23,7 @@ FRAME_SAMPLE_RESULT = 4
 FRAME_ERROR = 5
 
 _HELLO = struct.Struct("<II")
-_SAMPLE_REQUEST = struct.Struct("<IQQ")
+_SAMPLE_REQUEST = struct.Struct("<IIQQ")
 _SAMPLE_RESULT_PREFIX = struct.Struct("<I")
 _HELLO_ACK = struct.Struct("<I32sIQQQffffff20sffI10f16s16s32s")
 assert _HELLO_ACK.size == HELLO_ACK_FIXED_LEN
@@ -86,10 +86,12 @@ def encode_hello() -> bytes:
     return _HELLO.pack(SAMPLE_PROTOCOL_VERSION, ENCODING_VERSION)
 
 
-def encode_sample_request(batch: int, window_rows: int, seed: int) -> bytes:
+def encode_sample_request(
+    batch: int, window_rows: int, seed: int, *, terminal_only: bool = False
+) -> bytes:
     if batch <= 0 or window_rows <= 0:
         raise ValueError("batch and window must be positive")
-    return _SAMPLE_REQUEST.pack(batch, window_rows, seed)
+    return _SAMPLE_REQUEST.pack(batch, int(terminal_only), window_rows, seed)
 
 
 def split_sample_result(payload: memoryview) -> tuple[memoryview, memoryview]:

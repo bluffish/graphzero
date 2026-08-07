@@ -22,6 +22,7 @@ from gz.trainer.losses import (
     auxiliary_task_loss,
     lr_at_step,
     policy_ce_loss,
+    policy_diagnostic_metrics,
     soft_policy_ce_loss,
     value_head_loss,
 )
@@ -34,6 +35,11 @@ if TYPE_CHECKING:
 class StepMetrics:
     step: int
     policy_loss: float
+    policy_target_entropy: float
+    policy_kl: float
+    policy_uniform_advantage: float
+    policy_logit_std: float
+    policy_logit_abs_mean: float
     soft_policy_loss: float
     soft_policy_kl: float
     soft_policy_target_entropy: float
@@ -70,6 +76,11 @@ class StepMetrics:
 @dataclass(slots=True)
 class _StepComputation:
     policy_loss: object
+    policy_target_entropy: object
+    policy_kl: object
+    policy_uniform_advantage: object
+    policy_logit_std: object
+    policy_logit_abs_mean: object
     soft_policy_loss: object
     soft_policy_kl: object
     soft_policy_target_entropy: object
@@ -174,6 +185,13 @@ def _separate_batch_step(
             soft_logits,
             zero,
         )
+        policy_metrics = _policy_diagnostics(
+            loop,
+            policy_batch,
+            logits,
+            zero,
+            with_metrics,
+        )
         policy_objective = policy_loss + loop.config.soft_policy_weight * soft_loss
     policy_objective.backward()
     del logits
@@ -217,6 +235,11 @@ def _separate_batch_step(
     loss = policy_objective.detach() + loop.config.value_weight * value_terms[0].detach()
     return _StepComputation(
         policy_loss=policy_loss.detach(),
+        policy_target_entropy=policy_metrics[0],
+        policy_kl=policy_metrics[1],
+        policy_uniform_advantage=policy_metrics[2],
+        policy_logit_std=policy_metrics[3],
+        policy_logit_abs_mean=policy_metrics[4],
         soft_policy_loss=soft_loss.detach(),
         soft_policy_kl=soft_kl.detach(),
         soft_policy_target_entropy=soft_entropy.detach(),
@@ -274,6 +297,13 @@ def _joint_batch_step(
             soft_logits,
             zero,
         )
+        policy_metrics = _policy_diagnostics(
+            loop,
+            batch,
+            logits,
+            zero,
+            with_metrics,
+        )
         loss = (
             policy_loss
             + loop.config.soft_policy_weight * soft_loss
@@ -297,6 +327,11 @@ def _joint_batch_step(
     loss.backward()
     return _StepComputation(
         policy_loss=policy_loss.detach(),
+        policy_target_entropy=policy_metrics[0],
+        policy_kl=policy_metrics[1],
+        policy_uniform_advantage=policy_metrics[2],
+        policy_logit_std=policy_metrics[3],
+        policy_logit_abs_mean=policy_metrics[4],
         soft_policy_loss=soft_loss.detach(),
         soft_policy_kl=soft_kl.detach(),
         soft_policy_target_entropy=soft_entropy.detach(),
@@ -385,6 +420,26 @@ def _policy_losses(
     return policy_loss, soft_loss, soft_kl, soft_entropy
 
 
+def _policy_diagnostics(
+    loop: TrainerLoop,
+    batch: TrainingBatch,
+    logits: object,
+    zero: object,
+    with_metrics: bool,
+) -> tuple[object, object, object, object, object]:
+    if not with_metrics:
+        return zero, zero, zero, zero, zero
+    with _torch().no_grad():
+        return policy_diagnostic_metrics(
+            logits,
+            batch.policy,
+            batch.features.action_count,
+            batch.row_count,
+            action_kind=getattr(batch.features, "action_kind", None),
+            mask_stop=loop.config.mask_stop_loss,
+        )
+
+
 def _value_losses(
     loop: TrainerLoop,
     batch: TrainingBatch,
@@ -451,11 +506,8 @@ def _finish_metrics(
         fraction_valid = valid.float().mean()
         if computation.score_prediction is not None:
             score_valid = row_mask & (batch.horizon_value_valid > 0)
-            terminal_nodes = -batch.reward.float()
-            score_error = (
-                computation.score_prediction.float() * float(loop.model.schema.max_nodes)
-                - terminal_nodes
-            )
+            terminal_cost = -batch.reward.float()
+            score_error = computation.score_prediction.float() - terminal_cost
             score_weight = score_valid.to(score_error.dtype)
             score_count = score_weight.sum().clamp(min=1.0)
             terminal_score_mae = (score_error.abs() * score_weight).sum() / score_count
@@ -466,7 +518,6 @@ def _finish_metrics(
         auxiliary_signals = (
             auxiliary_signal_metrics(
                 torch,
-                loop.model,
                 batch,
                 computation.score_prediction,
             )
@@ -477,6 +528,11 @@ def _finish_metrics(
     return StepMetrics(
         step=loop.step_index,
         policy_loss=_scalar(computation.policy_loss),
+        policy_target_entropy=_scalar(computation.policy_target_entropy),
+        policy_kl=_scalar(computation.policy_kl),
+        policy_uniform_advantage=_scalar(computation.policy_uniform_advantage),
+        policy_logit_std=_scalar(computation.policy_logit_std),
+        policy_logit_abs_mean=_scalar(computation.policy_logit_abs_mean),
         soft_policy_loss=_scalar(computation.soft_policy_loss),
         soft_policy_kl=_scalar(computation.soft_policy_kl),
         soft_policy_target_entropy=_scalar(computation.soft_policy_target_entropy),

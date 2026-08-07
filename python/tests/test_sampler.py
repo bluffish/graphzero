@@ -189,7 +189,8 @@ def serve_samples(
                         frame_type, payload = read_frame(conn, bytearray())
                         assert frame_type == 3
                         assert struct.unpack_from("<I", payload, 0)[0] > 0
-                        assert struct.unpack_from("<Q", payload, 4)[0] == 2
+                        assert struct.unpack_from("<I", payload, 4)[0] == 0
+                        assert struct.unpack_from("<Q", payload, 8)[0] == 2
                         batch, targets = responses[response_index]
                         response_index += 1
                         write_frame(conn, 4, struct.pack("<I", len(batch)), batch, targets)

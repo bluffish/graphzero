@@ -9,7 +9,7 @@ use gz_features::{
     ActionFeature, FeatureEdge, FeatureRow, FeatureSchema, FeatureSchemaConfig, PositionFeatures,
     encode_feature_row,
 };
-use gz_replay::{ReplayEpisodeRecord, ReplayOutcome, ReplayRow};
+use gz_replay::{ReplayEpisodeRecord, ReplayOutcome, ReplayRow, ReplayRowKind};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -100,13 +100,14 @@ pub fn episode_with_rows(row_count: usize) -> (ReplayEpisodeRecord, Vec<ReplayRo
         let action = candidate_action(before, 40 + index as u8);
         steps.push(SearchStepRef::new(before, action, after).unwrap());
         rows.push(ReplayRow {
+            kind: ReplayRowKind::Decision,
             step_index: index as u32,
             root,
             state: before,
             action_history: history.clone(),
             legal_actions: vec![action, stop_action(before)],
             policy_target: vec![1.0, 0.0],
-            selected_action: action,
+            selected_action: Some(action),
             value_target: None,
             horizon_value_targets: None,
             reward_target: Some(5.0),

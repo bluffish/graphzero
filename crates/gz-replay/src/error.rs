@@ -9,6 +9,7 @@ pub enum ReplayError {
     SchemaMismatch,
     EngineIdentityMismatch,
     DataModeMismatch,
+    TargetContractMismatch,
     Empty,
     Storage(String),
 }
@@ -34,6 +35,7 @@ impl fmt::Display for ReplayError {
             Self::SchemaMismatch => write!(f, "replay schema version mismatch"),
             Self::EngineIdentityMismatch => write!(f, "replay engine identity mismatch"),
             Self::DataModeMismatch => write!(f, "replay data mode mismatch"),
+            Self::TargetContractMismatch => write!(f, "replay target contract mismatch"),
             Self::Empty => write!(f, "replay store is empty"),
             Self::Storage(message) => write!(f, "replay storage error: {message}"),
         }

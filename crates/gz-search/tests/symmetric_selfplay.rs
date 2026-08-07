@@ -135,7 +135,7 @@ fn drive_with_reuse_options(
         GumbelEpisodeContext { noise_seed: 17 },
     );
     let mut evals = 0;
-    let mut measures = 0;
+    let mut measure_pairs = 0;
     let mut pending_applies = Vec::new();
     let mut pending_evals = Vec::new();
     let mut max_pending_evals = 0;
@@ -169,11 +169,12 @@ fn drive_with_reuse_options(
                             Some(SearchWorkResult::Apply(applied))
                         }
                     }
-                    SearchWork::Measure(work) => {
-                        measures += 1;
-                        Some(SearchWorkResult::Measure(
-                            engine.measure(work.graph, work.options).unwrap(),
-                        ))
+                    SearchWork::MeasurePair(work) => {
+                        measure_pairs += 1;
+                        Some(SearchWorkResult::MeasurePair([
+                            engine.measure(work.graphs[0], work.options).unwrap(),
+                            engine.measure(work.graphs[1], work.options).unwrap(),
+                        ]))
                     }
                     SearchWork::Eval(work) => {
                         assert!(work.opponent.is_some());
@@ -240,7 +241,10 @@ fn drive_with_reuse_options(
             SearchPoll::Done(episode) => {
                 assert!(pending_applies.is_empty());
                 assert!(pending_evals.is_empty());
-                assert_eq!(measures, 2, "only final episode graphs may be measured");
+                assert_eq!(
+                    measure_pairs, 1,
+                    "only one final episode pair may be measured"
+                );
                 let handles = task.take_releasable();
                 engine
                     .release(&handles.graphs, &handles.candidates)
@@ -854,9 +858,10 @@ fn aborting_a_promoted_tree_returns_every_retained_handle() {
                 created_graphs.push(applied.after);
                 SearchWorkResult::Apply(applied)
             }
-            SearchWork::Measure(work) => {
-                SearchWorkResult::Measure(engine.measure(work.graph, work.options).unwrap())
-            }
+            SearchWork::MeasurePair(work) => SearchWorkResult::MeasurePair([
+                engine.measure(work.graphs[0], work.options).unwrap(),
+                engine.measure(work.graphs[1], work.options).unwrap(),
+            ]),
             SearchWork::Eval(work) => {
                 evals += 1;
                 SearchWorkResult::Eval(EvalOutput {

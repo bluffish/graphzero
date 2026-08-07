@@ -3,7 +3,7 @@ use gz_features::{ENCODING_VERSION, FeatureSchemaHash};
 use std::io::{ErrorKind, Read, Write};
 use std::num::{NonZeroU64, NonZeroUsize};
 
-pub const SAMPLE_PROTOCOL_VERSION: u32 = 12;
+pub const SAMPLE_PROTOCOL_VERSION: u32 = 13;
 pub const HELLO_ACK_FIXED_LEN: usize = 224;
 
 pub(crate) const FRAME_HELLO: u8 = 1;
@@ -25,18 +25,25 @@ pub(crate) type ProtocolResult<T> = Result<T, (u32, &'static str)>;
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) struct SampleRequest {
     pub batch: NonZeroUsize,
+    pub terminal_only: bool,
     pub window_rows: NonZeroU64,
     pub seed: u64,
 }
 
 impl SampleRequest {
     pub fn decode(payload: &[u8], max_batch: NonZeroUsize) -> ProtocolResult<Self> {
-        if payload.len() != 20 {
+        if payload.len() != 24 {
             return Err((ERROR_PROTOCOL, "bad SAMPLE length"));
         }
         let batch = u32::from_le_bytes(payload[0..4].try_into().expect("len checked")) as usize;
-        let window_rows = u64::from_le_bytes(payload[4..12].try_into().expect("len checked"));
-        let seed = u64::from_le_bytes(payload[12..20].try_into().expect("len checked"));
+        let terminal_only = match u32::from_le_bytes(payload[4..8].try_into().expect("len checked"))
+        {
+            0 => false,
+            1 => true,
+            _ => return Err((ERROR_BAD_REQUEST, "invalid SAMPLE row kind")),
+        };
+        let window_rows = u64::from_le_bytes(payload[8..16].try_into().expect("len checked"));
+        let seed = u64::from_le_bytes(payload[16..24].try_into().expect("len checked"));
         let batch = NonZeroUsize::new(batch)
             .filter(|batch| *batch <= max_batch)
             .ok_or((ERROR_BAD_REQUEST, "invalid SAMPLE request"))?;
@@ -44,6 +51,7 @@ impl SampleRequest {
             NonZeroU64::new(window_rows).ok_or((ERROR_BAD_REQUEST, "invalid SAMPLE request"))?;
         Ok(Self {
             batch,
+            terminal_only,
             window_rows,
             seed,
         })

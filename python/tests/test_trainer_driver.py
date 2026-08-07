@@ -151,6 +151,7 @@ graphzero_bin = "graphzero"
     [
         ("trainer", "value_trunk_grad_scale", "1.1", "value_trunk_grad_scale"),
         ("trainer", "compile_mode", '"unknown"', "compile_mode"),
+        ("trainer", "value_init", '"unknown"', "value_init"),
         ("trainer", "checkpoint_retain", "-1", "checkpoint_retain"),
         ("trainer", "min_startup_rows", "0", "min_startup_rows"),
         (
@@ -158,6 +159,12 @@ graphzero_bin = "graphzero"
             "actor_checkpoint_pointer",
             '"nested/latest.json"',
             "actor_checkpoint_pointer",
+        ),
+        (
+            "selfplay",
+            "symmetric_reward_tie_epsilon",
+            "-0.1",
+            "symmetric_reward_tie_epsilon",
         ),
     ],
 )
@@ -280,8 +287,10 @@ def test_sample_training_batches_uses_independent_windows_and_streams() -> None:
             self.result = result
             self.calls = []
 
-        def sample(self, batch: int, window: int, seed: int):
-            self.calls.append((batch, window, seed))
+        def sample(
+            self, batch: int, window: int, seed: int, *, terminal_only: bool = False
+        ):
+            self.calls.append((batch, window, seed, terminal_only))
             return self.result
 
     policy = Sampler("policy")
@@ -293,6 +302,7 @@ def test_sample_training_batches_uses_independent_windows_and_streams() -> None:
             policy_window_rows=30_000,
             value_batch=64,
             value_window_rows=300_000,
+            value_terminal_fraction=1.0,
             run_seed=42,
             step=5,
             produced_rows=50_000,
@@ -304,6 +314,7 @@ def test_sample_training_batches_uses_independent_windows_and_streams() -> None:
     assert policy.calls[0][:2] == (512, 30_000)
     assert value.calls[0][:2] == (64, 50_000)
     assert policy.calls[0][2] != value.calls[0][2]
+    assert value.calls[0][3] is True
 
 
 def test_prefetcher_obeys_row_and_episode_gate() -> None:
@@ -319,7 +330,9 @@ def test_prefetcher_obeys_row_and_episode_gate() -> None:
                 episodes=0 if self.refreshes == 1 else 4,
             )
 
-        def sample(self, batch: int, window: int, seed: int):
+        def sample(
+            self, batch: int, window: int, seed: int, *, terminal_only: bool = False
+        ):
             self.samples.append((batch, window, seed))
             return "batch"
 
@@ -330,6 +343,7 @@ def test_prefetcher_obeys_row_and_episode_gate() -> None:
         window_rows=30_000,
         value_batch=0,
         value_window_rows=30_000,
+        value_terminal_fraction=0.0,
         seed=42,
         total_steps=1,
         max_reuse=8.0,
@@ -391,6 +405,7 @@ lanes = 4
 workers_per_lane = 3
 tree_reuse = true
 mask_stop = true
+symmetric_reward_tie_epsilon = 0.01
 actor_checkpoint_pointer = "step_50000.json"
 eval_poll_interval = 0.0
 [measurement]
@@ -426,6 +441,13 @@ graphzero_bin = "graphzero-test"
     assert command[:2] == ["graphzero-test", "selfplay"]
     assert command[command.index("--lanes") + 1] == "4"
     assert command[command.index("--tree-reuse") + 1] == "true"
+    for process_command, _ in calls:
+        assert (
+            process_command[
+                process_command.index("--symmetric-reward-tie-epsilon") + 1
+            ]
+            == "0.01"
+        )
     assert command[command.index("--checkpoint-dir") + 1] == str(
         Path.cwd() / "frozen-actor"
     )
@@ -445,6 +467,74 @@ graphzero_bin = "graphzero-test"
     assert calls[1][1]["start_new_session"] is True
 
 
+def test_compiler_process_commands_include_engine_contract(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    config = load_config(
+        write_config(
+            tmp_path,
+            """
+[trainer]
+batch = 1
+terminal_score_target = "log1p-cost-ms"
+
+[selfplay]
+lanes = 1
+workers_per_lane = 1
+max_candidates = 1023
+symmetric_reward_tie_epsilon = 0.01
+
+[engine]
+kind = "compiler"
+compiler_deployment = "compiler.toml"
+compiler_max_nodes = 36352
+compiler_max_edges = 46080
+compiler_max_subjects = 24
+measure_samples = 4
+
+[measurement]
+enabled = true
+listen = "0.0.0.0:50051"
+server_cert = "tls/server.pem"
+server_key = "tls/server.key"
+client_ca = "tls/ca.pem"
+agents = ["22222222222222222222222222222222=tls/agent.pem"]
+receipt_dir = "measure-receipts"
+
+[paths]
+run_dir = "run"
+graphzero_bin = "graphzero-test"
+""",
+        )
+    )
+    calls = []
+
+    def run(command, **kwargs):
+        calls.append((command, kwargs))
+        return SimpleNamespace()
+
+    monkeypatch.setattr("gz.trainer.processes.subprocess.run", run)
+    monkeypatch.setattr("gz.trainer.processes.subprocess.Popen", run)
+    init_replay(config)
+    spawn_torch_selfplay(config)
+
+    for command, _ in calls:
+        assert command[command.index("--engine") + 1] == "compiler"
+        assert command[command.index("--compiler-deployment") + 1] == str(
+            Path.cwd() / "compiler.toml"
+        )
+        assert command[command.index("--compiler-max-nodes") + 1] == "36352"
+        assert command[command.index("--compiler-max-edges") + 1] == "46080"
+        assert command[command.index("--compiler-max-subjects") + 1] == "24"
+        assert command[command.index("--measure-samples") + 1] == "4"
+        assert (
+            command[command.index("--symmetric-reward-tie-epsilon") + 1]
+            == "0.01"
+        )
+    assert "--measure-profile" not in calls[1][0]
+
+
 def test_wandb_mapping_logs_only_explicit_metrics() -> None:
     class Run:
         def __init__(self) -> None:
@@ -460,6 +550,11 @@ def test_wandb_mapping_logs_only_explicit_metrics() -> None:
             "event": "step",
             "step": 8,
             "policy_loss": 1.25,
+            "policy_target_entropy": 0.75,
+            "policy_kl": 0.5,
+            "policy_uniform_advantage": 0.125,
+            "policy_logit_std": 0.25,
+            "policy_logit_abs_mean": 0.375,
             "soft_policy_loss": 2.0,
             "soft_policy_kl": 0.25,
             "soft_policy_target_entropy": 1.75,
@@ -471,6 +566,11 @@ def test_wandb_mapping_logs_only_explicit_metrics() -> None:
         (
             {
                 "train/policy_loss": 1.25,
+                "train/policy_target_entropy": 0.75,
+                "train/policy_kl": 0.5,
+                "train/policy_uniform_advantage": 0.125,
+                "train/policy_logit_std": 0.25,
+                "train/policy_logit_abs_mean": 0.375,
                 "train/soft_policy_loss": 2.0,
                 "train/soft_policy_kl": 0.25,
                 "train/soft_policy_target_entropy": 1.75,

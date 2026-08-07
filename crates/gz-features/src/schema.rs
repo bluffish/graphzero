@@ -4,12 +4,12 @@ use std::fmt;
 use std::str::FromStr;
 
 /// Row/targets encoding version: rows persist in replay stores, so this
-/// only moves with a store schema bump. v5 adds V8/V32 horizon targets to
-/// the training-target encoding; the feature-row body is unchanged.
-pub const ENCODING_VERSION: u32 = 5;
-/// Eval-wire batch/output encoding version. v5 = v4 plus transient opponent
-/// trajectory identity and row sections used by serving-side readout caches.
-pub const BATCH_ENCODING_VERSION: u32 = 5;
+/// only moves with a store schema bump. v6 widens node references in feature
+/// rows from u16 to u32.
+pub const ENCODING_VERSION: u32 = 6;
+/// Eval-wire batch/output encoding version. v6 widens node references in
+/// feature batches from u16 to u32.
+pub const BATCH_ENCODING_VERSION: u32 = 6;
 pub const STOP_ACTION_KIND_TOKEN: u32 = 1;
 
 #[derive(Clone, Debug, PartialEq)]
@@ -135,11 +135,6 @@ fn validate_config(config: &FeatureSchemaConfig) -> FeatureResult<()> {
     }
     if config.max_nodes == 0 {
         return Err(FeatureError::InvalidSchema("max_nodes must be positive"));
-    }
-    if config.max_nodes > u32::from(u16::MAX) {
-        return Err(FeatureError::InvalidSchema(
-            "max_nodes exceeds u16 subject-index width",
-        ));
     }
     if config.max_edges == 0 {
         return Err(FeatureError::InvalidSchema("max_edges must be positive"));

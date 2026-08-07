@@ -8,7 +8,7 @@ use crate::MeasureSubmissionEncoder;
 use crate::admission::{AdmissionPacer, EvalPressure, SharedAdmissionShaper};
 use crate::internal;
 use crate::leases::{EpisodeModelLeases, ModelLeaseRegistry};
-use crate::measurement::RemoteMeasureJob;
+use crate::measurement::{RemoteMeasureJob, RemoteMeasurePayload};
 use crate::pool::{Admission, AdmissionResult, CompletedTask, WorkerPool};
 use crate::root::RootSource;
 use gz_engine::{EngineIdentity, EngineResult, GraphEngine};
@@ -392,14 +392,20 @@ where
     let intake_tx = intake_tx.ok_or_else(|| internal("missing remote measure gateway"))?;
     let encoder = encoder.ok_or_else(|| internal("missing measure submission encoder"))?;
     for parked in pending {
-        let submission = encoder.encode(engine, parked.graph, parked.options)?;
+        let submission = match parked.payload {
+            RemoteMeasurePayload::Single { graph, options } => {
+                encoder.encode(engine, graph, options)?
+            }
+            RemoteMeasurePayload::Pair { graphs, options } => {
+                encoder.encode_pair(engine, graphs, options)?
+            }
+        };
         intake_tx
             .blocking_send(RemoteMeasureJob {
                 lane,
                 slot: parked.slot,
                 token: parked.token,
-                graph: parked.graph,
-                options: parked.options,
+                payload: parked.payload,
                 submission,
             })
             .map_err(|_| internal("measure gateway unavailable"))?;
@@ -470,6 +476,9 @@ where
         LaneReply::Eval(reply) => pool.resume(engine, reply.slot, reply.token, reply.output),
         LaneReply::Measure(reply) => {
             pool.resume_measure(engine, reply.slot, reply.token, reply.result)
+        }
+        LaneReply::MeasurePair(reply) => {
+            pool.resume_measure_pair(engine, reply.slot, reply.token, reply.result)
         }
     }
 }

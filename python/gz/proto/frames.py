@@ -7,10 +7,10 @@ from gz.proto.errors import ERROR_MALFORMED, ERROR_PROTOCOL, ProtocolError
 
 PROTOCOL_VERSION = 2
 # Row/targets encoding version: v5 adds V8/V32 training targets.
-ENCODING_VERSION = 5
+ENCODING_VERSION = 6
 # Eval-wire batch/output encoding version. v5 adds transient opponent
 # trajectory identity and row sections for serving-side readout caches.
-BATCH_ENCODING_VERSION = 5
+BATCH_ENCODING_VERSION = 6
 MAX_FRAME = 256 * 1024 * 1024
 
 FRAME_HELLO = 1

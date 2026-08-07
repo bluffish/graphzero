@@ -283,3 +283,7 @@ new rule. Write one concrete rule per line.
   directory instead.
 - Evaluate every simulated MCTS leaf, including terminal leaves, with the neural
   evaluator; call `GraphEngine::measure` only for selected episode-final graphs.
+- Preserve source-facing runtime ABI metadata when restoring portable compiler
+  states; canonical semantic module bytes intentionally omit it.
+- When remote measurement is enabled, dispatch symmetric terminal pairs
+  atomically instead of servicing `MeasurePair` on the local engine lane.

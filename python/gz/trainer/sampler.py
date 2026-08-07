@@ -134,8 +134,12 @@ class SampleClient:
                 raise TimeoutError("timed out waiting for replay sample service")
             time.sleep(self.backoff)
 
-    def sample(self, batch: int, window: int, seed: int) -> SampleResult:
-        return self._with_reconnect(lambda: self._sample_connected(batch, window, seed))
+    def sample(
+        self, batch: int, window: int, seed: int, *, terminal_only: bool = False
+    ) -> SampleResult:
+        return self._with_reconnect(
+            lambda: self._sample_connected(batch, window, seed, terminal_only)
+        )
 
     def refresh(self) -> SampleAck:
         """Re-acks on the live connection for fresh produced_rows."""
@@ -167,14 +171,16 @@ class SampleClient:
         self.ack = decode_ack(payload)
         return self.ack
 
-    def _sample_connected(self, batch: int, window: int, seed: int) -> SampleResult:
+    def _sample_connected(
+        self, batch: int, window: int, seed: int, terminal_only: bool
+    ) -> SampleResult:
         if self.sock is None:
             self.connect()
         assert self.sock is not None
         write_frame(
             self.sock,
             FRAME_SAMPLE,
-            encode_sample_request(batch, window, seed),
+            encode_sample_request(batch, window, seed, terminal_only=terminal_only),
         )
         frame_type, payload = read_frame(self.sock, self.read_buf)
         if frame_type == FRAME_ERROR:
