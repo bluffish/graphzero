@@ -18,7 +18,7 @@ replay_retain = 320000
 
 [measurement]
 enabled = true
-listen = "100.116.59.97:50051"
+listen = "0.0.0.0:50051"
 server_cert = "runs/whittle-generated-exphormer-v2-symmetric-selfplay/measurement/tls/server.pem"
 server_key = "runs/whittle-generated-exphormer-v2-symmetric-selfplay/measurement/tls/server.key"
 client_ca = "runs/whittle-generated-exphormer-v2-symmetric-selfplay/measurement/tls/ca.pem"
